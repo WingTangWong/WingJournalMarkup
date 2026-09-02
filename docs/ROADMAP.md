@@ -31,6 +31,23 @@ help a person produce scannable pages.
 
 ---
 
+## D1 – Demo web app ✅
+
+**Goal:** a browsable end-to-end demo of the pipeline.
+
+- ✅ `demo/` — Flask app: upload photos → ingest → persist (SQLite + blob store +
+      `data/scans/<uuid>_<timestamp>` archive)
+- ✅ Colour-coded structured capture view (identity, provenance, literal regions,
+      conflicts, parsed elements)
+- ✅ Reassembled PDF download (overlaid scan + text sheet)
+- ✅ Differential update on re-upload of a known page
+- ✅ Graph explorer (cytoscape.js): spatial links, document grouping, orphans,
+      pan/zoom, spatial-grid layout
+- ⬜ Live re-render while a batch ingests; auth; deploy target (out of scope for
+      a local demo)
+
+---
+
 ## M0 – Project scaffold ✅
 
 **Goal:** a runnable, tested Python package and a public repo.
