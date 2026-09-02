@@ -84,14 +84,45 @@ def _text_baseline(pre: Preprocessed, polygon: np.ndarray | None) -> Orientation
     )
 
 
+def _from_metadata_block(rectified: np.ndarray) -> Orientation | None:
+    """Tier E (spec §32): the segmented metadata block sits at the top of the
+    page. Try all four rotations of the provisionally-rectified image and pick
+    the one where a metadata block scores best near the top."""
+
+    from wingjournal.recognition.metadata_block import detect_metadata_block
+
+    best: tuple[int, float] | None = None
+    for deg in (0, 90, 180, 270):
+        img = rotate_upright(rectified, deg)
+        mb = detect_metadata_block(img)
+        if mb is None:
+            continue
+        near_top = (mb.bbox[1] + mb.bbox[3]) < img.shape[0] * 0.5
+        score = mb.confidence * (1.0 if near_top else 0.25)
+        if best is None or score > best[1]:
+            best = (deg, score)
+    if best is None or best[1] < 0.5:
+        return None
+    return Orientation(
+        degrees=best[0], method="metadata_block",
+        confidence=round(min(0.95, best[1]), 3), flip_ambiguous=False,
+    )
+
+
 def resolve_orientation(
     pre: Preprocessed,
     markers: list[DetectedMarker],
     boundary_polygon: list[list[float]] | np.ndarray | None = None,
+    rectified: np.ndarray | None = None,
 ) -> Orientation:
     by_ids = _from_marker_ids(markers)
     if by_ids is not None:
         return by_ids
+
+    if rectified is not None:
+        by_block = _from_metadata_block(rectified)
+        if by_block is not None:
+            return by_block
 
     poly = None
     if boundary_polygon is not None:

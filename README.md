@@ -12,6 +12,7 @@ This repository is the **CLI edition**: Python + OpenCV, command-line only for n
 - Full design: [`docs/SPEC-v0-draft.md`](docs/SPEC-v0-draft.md)
 - Independent review of that design: [`docs/ASSESSMENT.md`](docs/ASSESSMENT.md)
 - Milestones and tasks: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+- Normalized page coordinates: [`docs/COORDINATES.md`](docs/COORDINATES.md)
 - Contributing + dev setup: [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
 - Ready-to-print writing sheets: [`samples/`](samples/)
 
@@ -19,29 +20,29 @@ This repository is the **CLI edition**: Python + OpenCV, command-line only for n
 
 Early. The ingestion front-end runs end to end: acquire → preprocess →
 ArUco + undecoded-square detection → ranked page-boundary hypotheses →
-orientation resolution → perspective normalization + upright rotation →
-`Capture` JSON. It is strong with 3–4 corner markers and degrades (for now, to a
-whole-frame guess) with fewer. Everything past normalization is roadmap.
+orientation resolution → perspective normalization → metadata-block detection →
+persist to a store (SQLite + content-addressed blobs). It is strong with 3–4
+corner markers and degrades gracefully with fewer. OCR and the markup parser are
+the next milestone.
 
 | Stage | State |
 |---|---|
-| Capture sources (`FileSource`, `DirectorySource`) | ✅ done |
-| Preprocess (grayscale / CLAHE / threshold / edges / quads) | ✅ done |
-| ArUco detection + generation | ✅ done |
-| Undecoded square-contour → `FiducialCandidate` | ✅ done |
-| Multi-evidence boundary hypotheses + weighted scorer | ✅ done |
-| Orientation resolution (marker IDs; text-baseline fallback) | ✅ done |
-| Partial-marker frame (3-corner completion, markers ⊕ squares) | ✅ done |
-| Structure-envelope hypotheses + iterative refinement | ✅ done |
-| Perspective normalization (homography + warp + rotate) | ✅ done |
-| Evaluation harness (`wingjournal eval`) + `--debug` overlays | ✅ done |
-| Printable writing sheet + legend (PDF / PNG) | ✅ done |
-| Real phone-photo test corpus | ⬜ roadmap |
-| Literal-box masking, OCR, WJM markup parser | ⬜ roadmap |
-| Page / document / semantic graphs, capture reconciliation | ⬜ roadmap |
+| Capture sources, preprocess, ArUco detect/generate | ✅ done |
+| Boundary: undecoded squares, weighted hypothesis scorer, iterative refinement | ✅ done |
+| Partial-marker frame + content-envelope fallback | ✅ done |
+| Orientation: marker IDs → metadata-block → text baseline | ✅ done |
+| Perspective normalization → fixed normalized coordinates ([`docs/COORDINATES.md`](docs/COORDINATES.md)) | ✅ done |
+| Segmented metadata-block detection (geometry) | ✅ done |
+| Tag grammar (`#term` / `#[term with spaces]` / references) | ✅ done |
+| SQLite + blob store; `ingest --store`, `show-page`, `history` | ✅ done |
+| Page-identity ladder + conflict model | ✅ done (needs OCR for real ids) |
+| Evaluation harness + `--debug` overlays; writing-sheet / legend PDF·PNG | ✅ done |
+| OCR / handwriting recognition, WJM markup parser | ⬜ next (M4–M5) |
+| Diagram graph, semantic graphs, capture reconciliation | ⬜ roadmap |
 
 Synthetic detection numbers (`wingjournal eval --cases 40`): 4-marker boundary
-IoU ≈ 0.998 / orientation 100%; 3-marker ≈ 0.95; 2-marker ≈ 0.75; 1-marker ≈ 0.69.
+IoU ≈ 0.998 / orientation 100%; 3-marker ≈ 0.95 / 100%; 2-marker ≈ 0.75 / 80%;
+1-marker ≈ 0.69 / 80%.
 
 ## Install
 
@@ -66,30 +67,26 @@ wingjournal make-sheet   --out writing-sheet.pdf --pages 5 --ruled
 wingjournal make-sheet   --out writing-sheet.png
 wingjournal make-legend  --out legend.pdf
 
-# Run the ingestion pipeline: writes ./out/normalized/<name>.png
-# and a JSON Capture sidecar to ./out/captures/<name>.json
-wingjournal ingest photo.jpg --out out
+# Run the ingestion pipeline: writes ./out/normalized/<name>.png + a JSON
+# Capture sidecar, and (with --store) persists to a SQLite + blob store
+wingjournal ingest photo.jpg --out out --store wjm-store
+wingjournal ingest ./scans/  --out out --store wjm-store --recursive
+wingjournal ingest photo.jpg --out out --debug        # per-stage overlays
 
-# Add --debug for per-stage overlays in ./out/debug/
-wingjournal ingest photo.jpg --out out --debug
-
-# A whole directory of scans
-wingjournal ingest ./scans/ --out out --recursive
+# Inspect the store
+wingjournal show-page <page-uuid-or-prefix> --store wjm-store
+wingjournal history  <page-uuid-or-prefix> --store wjm-store
 
 # Score boundary + orientation detection on a synthetic corpus
 wingjournal eval --cases 40 --verbose
 
-# Generate a synthetic WJM page image to experiment with
 wingjournal make-test-page --out page.png --warp --seed 1
-
-# List ArUco dictionaries you can pass to --dict
 wingjournal dictionaries
 ```
 
-Hypothesis scoring weights can be overridden with `--weights weights.json`
-(any subset of the `ScoringWeights` fields). `show-page` and `history` are
-recognized but not implemented yet — they need the page/document graph (see the
-roadmap).
+Hypothesis scoring weights can be overridden with `--weights weights.json` (any
+subset of the `ScoringWeights` fields). Until OCR lands (M4) the pipeline can't
+read handwritten page ids, so every capture resolves to a fresh page.
 
 ## Fiducials
 

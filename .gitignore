@@ -24,6 +24,7 @@ env/
 # WJM runtime output
 /out/
 /captures/
+/wjm-store/
 *.wjm-cache/
 # default CLI artifact names when run without --out (samples/ is committed)
 /wjm-writing-sheet*.pdf

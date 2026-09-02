@@ -1,10 +1,10 @@
-"""Perspective normalization (spec section 35).
+"""Perspective normalization (spec section 35; see docs/COORDINATES.md).
 
 Given an ordered page quadrilateral, compute the homography and warp the page
-into normalized coordinates. Output size is derived from the observed quad edge
-lengths so we do not stretch the page. An optional upright rotation is folded
-into the returned homography, so it always maps raw-image coords onto the image
-this function returns.
+into normalized coordinates. The output is scaled to a fixed target size (longer
+side = ``target_long_px``) so repeated captures of one page are directly
+comparable. An optional upright rotation is folded into the returned homography,
+so it always maps raw-image coords onto the image this function returns.
 """
 
 from __future__ import annotations
@@ -12,16 +12,36 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+# default normalized-page long side, in pixels (~145 DPI for US Letter)
+TARGET_LONG_PX = 1600
+
+# plausible page aspect ratios (long / short): Letter 1.294, A4 1.414
+_ASPECT_RANGE = (1.15, 1.6)
+
 
 def _edge(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(a - b))
 
 
-def output_size(quad: np.ndarray) -> tuple[int, int]:
+def observed_size(quad: np.ndarray) -> tuple[float, float]:
     tl, tr, br, bl = np.asarray(quad, dtype=np.float32)
     width = max(_edge(tl, tr), _edge(bl, br))
     height = max(_edge(tl, bl), _edge(tr, br))
-    return max(1, round(width)), max(1, round(height))
+    return width, height
+
+
+def output_size(quad: np.ndarray, target_long_px: int = TARGET_LONG_PX) -> tuple[int, int]:
+    """Fixed (w, h) for the normalized page: longer side == target_long_px,
+    aspect ratio taken from the quad and clamped to the plausible page range."""
+
+    width, height = observed_size(quad)
+    if min(width, height) < 1e-3:
+        return max(1, target_long_px), max(1, target_long_px)
+    aspect = max(width, height) / min(width, height)
+    aspect = float(np.clip(aspect, *_ASPECT_RANGE))
+    long_px = target_long_px
+    short_px = max(1, round(long_px / aspect))
+    return (short_px, long_px) if height >= width else (long_px, short_px)
 
 
 def _rotation_matrix(degrees: int, w: int, h: int) -> tuple[np.ndarray, tuple[int, int]]:
@@ -44,15 +64,16 @@ def rectify(
     quad: np.ndarray,
     size: tuple[int, int] | None = None,
     rotate_degrees: int = 0,
+    target_long_px: int = TARGET_LONG_PX,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(normalized_image, homography_3x3)``.
 
     ``homography`` maps raw-image coordinates onto ``normalized_image``, with any
-    ``rotate_degrees`` already composed in.
+    ``rotate_degrees`` already composed in. ``size`` overrides the fixed target.
     """
 
     quad = np.asarray(quad, dtype=np.float32).reshape(4, 2)
-    w, h = size if size is not None else output_size(quad)
+    w, h = size if size is not None else output_size(quad, target_long_px)
     dst = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
     homography = cv2.getPerspectiveTransform(quad, dst)
 

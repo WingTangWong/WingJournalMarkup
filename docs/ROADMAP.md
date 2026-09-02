@@ -105,22 +105,35 @@ full-frame ~0.5 floor)*; documented numbers for the real-photo subset
 
 ---
 
-## M3 – Persistence & page identity ⬜
+## M3 – Persistence & page identity 🚧
 
 **Goal:** captures accumulate against persistent pages on disk.
 
-- ⬜ Coordinate-system spec: origin, units, aspect, DPI (resolves ASSESSMENT §3.10)
-- ⬜ SQLite storage layer for `Document` / `Page` / `Capture` / `PageRelationship`
-- ⬜ Content-addressed store for raw + normalized images and assets
-- ⬜ Segmented metadata-block detection (top-of-page N-cell rectangle, spec §11)
-- ⬜ Metadata parsing: `#term` / `#[term with spaces]` grammar (spec §10),
-      document/page IDs, topic tags, L/A/B/R relationships
-- ⬜ Page-identity resolution ladder (spec §39): machine ID > handwritten ID >
-      spatial > visual match > new; **surface conflicts, never auto-resolve**
-- ⬜ `wingjournal show-page <ref>` and `wingjournal history <ref>`
+- ✅ Normalized-coordinate spec (`docs/COORDINATES.md`): origin, axes, fixed
+      target size / aspect clamp; `rectify` now produces a deterministic size so
+      repeated captures line up (resolves ASSESSMENT §3.10)
+- ✅ SQLite storage + content-addressed blob store (`wingjournal/storage/`):
+      `Document` / `Page` / `Capture` / `PageRelationship` / `Conflict`;
+      `wingjournal ingest --store DIR`
+- ✅ Segmented metadata-block detection (`recognition/metadata_block.py`, spec
+      §11): outer box, row divider, per-row cell grid (3 / 4) — geometry only;
+      also drives orientation **Tier E** (2/1-marker orientation 0.6 → 0.8)
+- ✅ Tag grammar parser (`recognition/tags.py`, spec §10, §19): `#term` /
+      `#[term with spaces]`, metadata cells → `PageMetadata`, `document:page:anchor`
+      references. Pure + fully tested; ready for OCR output in M4
+- ✅ Page-identity resolution ladder + `Conflict` model (`storage/identity.py`,
+      spec §39, §46): machine id > handwritten id > new; contradictions stored,
+      never auto-resolved. (Ladder is tested with synthetic ids; the pipeline
+      can't supply ids until OCR, so today every capture → a fresh page.)
+- ✅ `wingjournal show-page <ref>` and `wingjournal history <ref>`
+- ⬜ Metadata-block **cell text** → real `Page` identity/tags (needs OCR, M4)
+- ⬜ Visual-match identity for markerless re-scans (spec §39 rung 4)
+- ⬜ Spatial-graph document-membership propagation (moves toward M7)
 
 **Exit criteria:** ingesting the same page twice updates one `Page` with two
-`Capture`s; a machine/handwritten ID mismatch produces a stored conflict.
+`Capture`s *(mechanism done + tested via `resolve_identity`; end-to-end waits on
+OCR page ids)*; a machine/handwritten ID mismatch produces a stored conflict
+*(done, tested)*.
 
 ---
 

@@ -1,11 +1,13 @@
 """The ingestion pipeline.
 
     acquire -> preprocess -> detect ArUco + square candidates
-    -> ranked page-boundary hypotheses -> orientation resolution
-    -> perspective normalization + upright rotation -> Capture record (+ JSON)
+    -> iterative ranked page-boundary hypotheses -> orientation resolution
+    -> perspective normalization (fixed coords, upright rotation folded into the
+       homography) -> metadata-block detection -> Capture record
+    -> optional persist to a store
 
 Downstream stages (literal-box masking, OCR, markup parsing, graph update,
-capture reconciliation) are stubs on the roadmap.
+capture reconciliation) are on the roadmap (M4+).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from wingjournal.models import (
     PageBoundary,
     PageHypothesis,
 )
+from wingjournal.recognition.metadata_block import detect_metadata_block
 from wingjournal.vision.aruco import DEFAULT_DICT, detect_markers
 from wingjournal.vision.boundary import best_roles
 from wingjournal.vision.hypothesis import ScoringWeights, select_boundary
@@ -39,6 +42,7 @@ from wingjournal.vision.rectify import rectify
 class IngestResult:
     name: str
     capture: Capture
+    raw_image: np.ndarray
     normalized_image: np.ndarray
     orientation: Orientation
     hypotheses: list[PageHypothesis] = field(default_factory=list)
@@ -78,10 +82,17 @@ def ingest_image(
     markers = detect_markers(pre.gray, dict_name)
 
     boundary, hypotheses, squares = select_boundary(pre, markers, weights=weights)
-    orientation = resolve_orientation(pre, markers, boundary.polygon)
 
     quad = np.asarray(boundary.polygon, dtype=np.float32)
-    normalized, homography = rectify(image, quad, rotate_degrees=orientation.degrees)
+    provisional, provisional_h = rectify(image, quad)
+    orientation = resolve_orientation(pre, markers, boundary.polygon, rectified=provisional)
+
+    if orientation.degrees:
+        normalized, homography = rectify(image, quad, rotate_degrees=orientation.degrees)
+    else:
+        normalized, homography = provisional, provisional_h
+
+    metadata_block = detect_metadata_block(normalized)
 
     capture = Capture(
         source_type=source_type,
@@ -96,6 +107,7 @@ def ingest_image(
         homography=homography.tolist(),
         detected_fiducials=markers,
         inferred_fiducials=_decoded_candidates(markers, boundary) + squares,
+        metadata_block=dataclasses.asdict(metadata_block) if metadata_block else None,
         page_hypotheses=hypotheses,
     )
     capture.notes.append(
@@ -104,6 +116,11 @@ def ingest_image(
         f"orientation {orientation.degrees} deg via {orientation.method}"
         + (" (flip ambiguous)" if orientation.flip_ambiguous else "")
     )
+    if metadata_block is not None:
+        capture.notes.append(
+            f"metadata block: {len(metadata_block.row1_cells)}+"
+            f"{len(metadata_block.row2_cells)} cells (conf {metadata_block.confidence:.2f})"
+        )
     if not markers and not squares:
         capture.notes.append(
             "no fiducial evidence - boundary is a geometric guess (spec sections 27-28)"
@@ -111,6 +128,7 @@ def ingest_image(
     return IngestResult(
         name=name,
         capture=capture,
+        raw_image=image,
         normalized_image=normalized,
         orientation=orientation,
         hypotheses=hypotheses,
@@ -125,6 +143,7 @@ def ingest_path(
     recursive: bool = False,
     weights: ScoringWeights | None = None,
     debug: bool = False,
+    store=None,
 ) -> list[IngestResult]:
     src: CaptureSource = source_for(path, recursive=recursive)
     out_dir = Path(out_dir)
@@ -140,6 +159,15 @@ def ingest_path(
         norm_path = out_dir / "normalized" / f"{name}.png"
         cv2.imwrite(str(norm_path), result.normalized_image)
         result.capture.normalized_image_path = str(norm_path)
+
+        if store is not None:
+            from wingjournal.storage import persist_ingest
+
+            ok, buf = cv2.imencode(".png", result.raw_image)
+            persist_ingest(
+                store, result.capture, result.normalized_image,
+                buf.tobytes() if ok else b"",
+            )
 
         cap_path = out_dir / "captures" / f"{name}.json"
         cap_path.write_text(json.dumps(dataclasses.asdict(result.capture), indent=2))

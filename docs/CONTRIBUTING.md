@@ -18,17 +18,20 @@ in by `pip install -e .`.
 
 ```
 src/wingjournal/
-  capture/     capture sources (FileSource, DirectorySource, ...)
-  vision/      OpenCV front-end: preprocess, aruco, boundary, fiducial_candidates,
-               hypothesis (scorer), orientation, rectify, debug, synthetic
-  templates/   printable PDFs: geometry, writing_sheet, legend
-  eval/        evaluation harness: corpus, metrics, harness
-  models/      dataclasses (Capture, DetectedMarker, FiducialCandidate,
-               PageHypothesis, Orientation, ...)
-  pipeline.py  the ingestion pipeline
-  cli.py       argparse entry point (wingjournal / wjm)
-tests/         pytest; conftest.py builds synthetic pages
-docs/          SPEC-v0-draft, ASSESSMENT, ROADMAP
+  capture/      capture sources (FileSource, DirectorySource, ...)
+  vision/       OpenCV front-end: preprocess, aruco, boundary, fiducial_candidates,
+                hypothesis (scorer + iterative select_boundary), envelope,
+                orientation, rectify, debug, synthetic
+  recognition/  tags (grammar), metadata_block (geometry); OCR-fed parsing lands M4
+  storage/      SQLite + content-addressed blob store; identity resolution
+  templates/    printable PDF / PNG: geometry, writing_sheet, legend
+  eval/         evaluation harness: corpus, metrics, harness
+  models/       dataclasses (Capture, Page, Document, PageRelationship, Conflict,
+                DetectedMarker, FiducialCandidate, PageHypothesis, Orientation, ...)
+  pipeline.py   the ingestion pipeline
+  cli.py        argparse entry point (wingjournal / wjm)
+tests/          pytest; conftest.py builds synthetic pages
+docs/           SPEC-v0-draft, ASSESSMENT, ROADMAP, COORDINATES
 ```
 
 New pipeline stages land as their own `vision/` or `recognition/` module with

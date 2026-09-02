@@ -108,8 +108,71 @@ class Capture:
 
     detected_fiducials: list[DetectedMarker] = field(default_factory=list)
     inferred_fiducials: list[FiducialCandidate] = field(default_factory=list)
+    metadata_block: dict | None = None  # geometry only until OCR (M4)
     detected_elements: list[dict] = field(default_factory=list)
 
     previous_capture_uuid: str | None = None
 
+    # content-addressed blob ids in the store (SHA-256 hex), set on persist
+    raw_blob: str | None = None
+    normalized_blob: str | None = None
+
     notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Document:
+    """A logical collection of pages (spec §3.2). Not the same as a notebook."""
+
+    uuid: str = field(default_factory=_new_uuid)
+    name: str | None = None
+    created_at: str = field(default_factory=_now)
+
+
+@dataclass
+class Page:
+    """A persistent page object (spec §42). Many captures observe one page."""
+
+    uuid: str = field(default_factory=_new_uuid)
+    created_at: str = field(default_factory=_now)
+
+    document_id_explicit: str | None = None
+    document_id_resolved: str | None = None
+    document_id_resolution_source: str | None = None
+
+    page_id_explicit: str | None = None
+    page_id_machine: str | None = None
+
+    topic_tags: list[str] = field(default_factory=list)
+
+    left: str | None = None
+    above: str | None = None
+    below: str | None = None
+    right: str | None = None
+
+    capture_uuids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PageRelationship:
+    """A directed spatial link between pages (spec §44)."""
+
+    source_page: str
+    target_page: str
+    relation: str  # LEFT / ABOVE / BELOW / RIGHT
+    explicitly_declared: bool = True
+    source_capture: str | None = None
+    confidence: float = 1.0
+    uuid: str = field(default_factory=_new_uuid)
+
+
+@dataclass
+class Conflict:
+    """Contradictory evidence, surfaced rather than silently resolved (spec §46)."""
+
+    kind: str  # e.g. "page_id", "relationship", "document_id", "orientation"
+    detail: str
+    page_uuid: str | None = None
+    capture_uuid: str | None = None
+    created_at: str = field(default_factory=_now)
+    uuid: str = field(default_factory=_new_uuid)

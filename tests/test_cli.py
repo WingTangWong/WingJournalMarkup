@@ -64,5 +64,29 @@ def test_cli_default_dict_matches_aruco():
     assert _DEFAULT_DICT == DEFAULT_DICT
 
 
-def test_stub_exits_2(capsys):
-    assert main(["show-page", "Research:P017"]) == 2
+def test_show_page_without_store_errors(tmp_path):
+    assert main(["show-page", "Research:P017", "--store", str(tmp_path / "nope")]) == 1
+
+
+def test_ingest_store_then_show_and_history(tmp_path, capsys):
+    page = tmp_path / "p.png"
+    main(["make-test-page", "--out", str(page), "--warp", "--seed", "5"])
+    store = tmp_path / "store"
+
+    assert main(["ingest", str(page), "--out", str(tmp_path / "out"),
+                 "--store", str(store)]) == 0
+    assert (store / "wjm.sqlite").is_file()
+    out = capsys.readouterr().out
+    assert "page=" in out
+
+    import sqlite3
+
+    db = sqlite3.connect(store / "wjm.sqlite")
+    page_uuid = db.execute("SELECT uuid FROM pages").fetchone()[0]
+    db.close()
+
+    assert main(["show-page", page_uuid[:8], "--store", str(store)]) == 0
+    assert "captures : 1" in capsys.readouterr().out
+
+    assert main(["history", page_uuid, "--store", str(store)]) == 0
+    assert "1 capture(s)" in capsys.readouterr().out
