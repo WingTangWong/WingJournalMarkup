@@ -3,11 +3,12 @@
     acquire -> preprocess -> detect ArUco + square candidates
     -> iterative ranked page-boundary hypotheses -> orientation resolution
     -> perspective normalization (fixed coords, upright rotation folded into the
-       homography) -> metadata-block detection -> Capture record
-    -> optional persist to a store
+       homography) -> literal-region detect + mask -> metadata-block detect
+    -> (optional) OCR the metadata cells and, with parse_body, the page body
+    -> Capture record -> optional persist to a store
 
-Downstream stages (literal-box masking, OCR, markup parsing, graph update,
-capture reconciliation) are on the roadmap (M4+).
+Diagram-graph extraction and capture reconciliation are still on the roadmap
+(M6, M8).
 """
 
 from __future__ import annotations
@@ -79,6 +80,7 @@ def ingest_image(
     raw_path: str | None = None,
     weights: ScoringWeights | None = None,
     recognizer: str = "auto",
+    parse_body: bool = False,
 ) -> IngestResult:
     from wingjournal.recognition.text import get_recognizer
 
@@ -111,6 +113,18 @@ def ingest_image(
         page_metadata = dataclasses.asdict(reading.metadata)
         page_metadata["_confidence"] = reading.confidence
 
+    elements: list[dict] = []
+    if parse_body and rec.name != "none":
+        from wingjournal.recognition.page_text import recognize_lines
+        from wingjournal.recognition.parse import parse_lines
+
+        block_bottom = 0.0
+        if metadata_block is not None:
+            mb = metadata_block.bbox
+            block_bottom = (mb[1] + mb[3]) / for_parsing.shape[0]
+        lines = recognize_lines(for_parsing, rec, skip_top=block_bottom)
+        elements = [e.to_dict() for e in parse_lines(lines)]
+
     capture = Capture(
         source_type=source_type,
         raw_image_path=raw_path,
@@ -128,6 +142,7 @@ def ingest_image(
         page_metadata=page_metadata,
         text_backend=rec.name,
         literal_assets=[dataclasses.asdict(a) for a in literals],
+        detected_elements=elements,
         page_hypotheses=hypotheses,
     )
     capture.notes.append(
@@ -144,6 +159,13 @@ def ingest_image(
     if literals:
         capture.notes.append(
             f"{len(literals)} literal image region(s) detected and masked (spec §16)"
+        )
+    if elements:
+        by_kind: dict[str, int] = {}
+        for e in elements:
+            by_kind[e["kind"]] = by_kind.get(e["kind"], 0) + 1
+        capture.notes.append(
+            "parsed elements: " + ", ".join(f"{v} {k}" for k, v in sorted(by_kind.items()))
         )
     if not markers and not squares:
         capture.notes.append(
@@ -169,6 +191,7 @@ def ingest_path(
     debug: bool = False,
     store=None,
     recognizer: str = "auto",
+    parse_body: bool = False,
 ) -> list[IngestResult]:
     src: CaptureSource = source_for(path, recursive=recursive)
     out_dir = Path(out_dir)
@@ -180,6 +203,7 @@ def ingest_path(
         result = ingest_image(
             name, image, dict_name=dict_name, source_type=src.source_type,
             raw_path=str(path), weights=weights, recognizer=recognizer,
+            parse_body=parse_body,
         )
         norm_path = out_dir / "normalized" / f"{name}.png"
         cv2.imwrite(str(norm_path), result.normalized_image)

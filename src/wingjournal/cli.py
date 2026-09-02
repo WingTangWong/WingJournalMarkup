@@ -53,6 +53,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         results = ingest_path(
             args.path, args.out, dict_name=args.dict, recursive=args.recursive,
             weights=weights, debug=args.debug, store=store, recognizer=args.recognizer,
+            parse_body=args.parse_body,
         )
     finally:
         if store is not None:
@@ -232,6 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument(
         "--recognizer", default="auto", choices=("auto", "tesseract", "none"),
         help="text recognizer for metadata cells (auto: use tesseract if installed)",
+    )
+    p_ingest.add_argument(
+        "--parse-body", action="store_true",
+        help="also OCR + parse the page body into elements (bullets, tags, ...)",
     )
     p_ingest.add_argument(
         "--debug", action="store_true", help="write vision overlays to <out>/debug"
