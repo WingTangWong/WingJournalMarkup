@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Capture {{ cap.uuid | shortuuid }}{% endblock %}
+{% block body %}
+
+<h1>
+  {{ page.page_id_explicit or ('page ' ~ (page.uuid | shortuuid)) if page else 'capture' }}
+  <a style="font-size:.9rem" href="{{ url_for('capture_pdf', capture_uuid=cap.uuid) }}">&#8681; reassembled PDF</a>
+</h1>
+
+<div class="grid">
+  <div class="card">
+    <h2>Normalized page</h2>
+    {% if cap.normalized_blob %}
+      <img class="pageimg" src="{{ url_for('blob', digest=cap.normalized_blob) }}" alt="normalized page">
+    {% else %}<p class="muted">no normalized image</p>{% endif %}
+
+    {% if cap.literal_assets %}
+    <h2>Literal image regions <span class="pill">{{ cap.literal_assets|length }}</span></h2>
+    <p class="muted">interiors are not parsed (spec §16)</p>
+    {% for lit in cap.literal_assets %}
+      {% if lit.asset_blob %}
+      <img class="pageimg" style="max-width:220px;margin:.3rem" src="{{ url_for('blob', digest=lit.asset_blob) }}">
+      {% endif %}
+    {% endfor %}
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Page metadata</h2>
+    {% set md = cap.page_metadata or {} %}
+    <dl class="provenance">
+      <dt>document id</dt><dd>{{ md.document_id or '—' }}</dd>
+      <dt>page id</dt><dd>{{ md.page_id or '—' }}</dd>
+      <dt>topics</dt><dd>{% for t in md.topic_tags or [] %}<span class="tag">#{{ t }}</span> {% endfor %}{% if not md.topic_tags %}—{% endif %}</dd>
+      <dt>neighbours</dt><dd>
+        L={{ page.left or '—' }} &nbsp; A={{ page.above or '—' }} &nbsp;
+        B={{ page.below or '—' }} &nbsp; R={{ page.right or '—' }}</dd>
+      <dt>text backend</dt><dd><code>{{ cap.text_backend }}</code></dd>
+    </dl>
+
+    <h2>Detection provenance</h2>
+    <dl class="provenance">
+      <dt>boundary</dt><dd>{{ cap.page_boundary_method }}
+        (score {{ '%.2f' % cap.page_boundary_confidence }})</dd>
+      <dt>orientation</dt><dd>{{ cap.orientation_degrees }}&deg; via
+        {{ cap.orientation_method }}{% if cap.orientation_flip_ambiguous %} (flip ambiguous){% endif %}</dd>
+      <dt>fiducials</dt><dd>{{ cap.detected_fiducials|length }} marker(s),
+        {{ cap.inferred_fiducials|length }} candidate(s)</dd>
+      <dt>metadata block</dt><dd>
+        {% if cap.metadata_block %}{{ cap.metadata_block.row1_cells|length }}+{{ cap.metadata_block.row2_cells|length }}
+          cells (conf {{ '%.2f' % cap.metadata_block.confidence }}){% else %}not found{% endif %}</dd>
+    </dl>
+
+    {% if captures_for_page|length > 1 %}
+    <h2>Captures of this page <span class="pill">{{ captures_for_page|length }}</span></h2>
+    <table>
+      {% for c in captures_for_page %}
+      <tr><td><a href="{{ url_for('capture', capture_uuid=c.uuid) }}">{{ c.uuid | shortuuid }}</a></td>
+          <td>{{ c.timestamp[:19] | replace('T',' ') }}</td>
+          <td>{% if c.uuid == cap.uuid %}<b>this</b>{% endif %}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </div>
+</div>
+
+{% if diff %}
+<div class="card diff">
+  <h2>Differential update from the previous capture</h2>
+  {% if diff.metadata_changes %}<p><b>metadata:</b>
+    {% for k, v in diff.metadata_changes.items() %}
+      <span class="changed">{{ k }}: {{ v['from'] }} &rarr; {{ v['to'] }}</span>{% if not loop.last %}; {% endif %}
+    {% endfor %}</p>{% endif %}
+  {% for c in diff.changed %}<div class="changed">• {{ c.item }} : {{ c['from'] }} &rarr; {{ c.to }}</div>{% endfor %}
+  {% for e in diff.added %}<div class="added">+ [{{ e.kind }}] {{ e.text }}</div>{% endfor %}
+  {% for e in diff.removed %}<div class="removed">− [{{ e.kind }}] {{ e.text }}</div>{% endfor %}
+  {% if diff.orientation %}<p class="muted">orientation {{ diff.orientation['from'] }}&deg; &rarr; {{ diff.orientation['to'] }}&deg;</p>{% endif %}
+</div>
+{% endif %}
+
+{% if conflicts %}
+<div class="card" style="border-color:#e0a0a0;background:#fdf0f0">
+  <h2>Conflicts</h2>
+  {% for c in conflicts %}<p>[{{ c.kind }}] {{ c.detail }}</p>{% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Structured content
+    {% for k, n in summary.items() %}<span class="pill">{{ n }} {{ k }}</span>{% endfor %}
+  </h2>
+  {% if elements %}
+  <ul class="elements">
+    {% for e in elements %}
+    <li class="{{ e.cls }} {{ 'done' if e.kind == 'bullet' and e.data.state == 'completed' else '' }}">
+      <span class="conf">{{ '%.0f%%' % (e.confidence * 100) if e.confidence else '' }}</span>
+      {% if e.kind == 'bullet' %}
+        <span class="glyph">{{ e.glyph }}</span><span class="text">{{ e.text }}</span>
+        <span class="state">{{ e.label }}</span>
+        {% for t in e.tags %}<span class="tag">#{{ t }}</span> {% endfor %}
+      {% elif e.kind == 'tags' %}
+        <span class="kind">tags</span>{% for t in e.tags %}<span class="tag">#{{ t }}</span> {% endfor %}
+      {% elif e.kind == 'temporal' %}
+        <span class="kind">{{ e.data.type }}</span><b>{{ e.label }}</b>
+      {% elif e.kind == 'reference' %}
+        <span class="kind">ref</span><code>{{ e.label }}</code>
+      {% elif e.kind == 'contact' %}
+        <span class="kind">contact</span>
+        <b>{{ e.contact.name }}</b>{% if e.contact.organization %} · {{ e.contact.organization }}{% endif %}<br>
+        {{ e.contact.email or '' }} {{ e.contact.phone or '' }}
+      {% else %}
+        <span class="kind">{{ e.kind }}</span>{{ e.text }}
+        {% for t in e.data.tags or [] %}<span class="tag">#{{ t }}</span> {% endfor %}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No body text extracted. Install <code>tesseract-ocr</code> and
+     re-upload for OCR of bullets, tags, temporal markers, references and contacts.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Notes</h2>
+  <ul>{% for n in cap.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+</div>
+
+{% endblock %}

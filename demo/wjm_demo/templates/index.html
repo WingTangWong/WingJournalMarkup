@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Upload a page photo</h1>
+
+<form class="dropzone" method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+  <p>Drop a scan or photo of a WJM page. Ingested with the <code>wingjournal</code>
+     pipeline; re-uploading a page whose <code>#PAGE</code> id is readable records a
+     differential update.</p>
+  <input type="file" name="image" accept="image/*" multiple required>
+  <button type="submit">Ingest</button>
+</form>
+
+<div class="grid">
+  <div class="card">
+    <h2>Pages <span class="pill">{{ pages|length }}</span></h2>
+    {% if pages %}
+    <table>
+      <tr><th>page id</th><th>document</th><th>topics</th><th>captures</th></tr>
+      {% for p in pages %}
+      <tr>
+        <td>
+          {% set last = p.capture_uuids[-1] if p.capture_uuids else None %}
+          {% if last %}<a href="{{ url_for('capture', capture_uuid=last) }}">{% endif %}
+          {{ p.page_id_explicit or (p.uuid | shortuuid) }}
+          {% if last %}</a>{% endif %}
+        </td>
+        <td>{{ p.document_id_resolved or p.document_id_explicit or '—' }}</td>
+        <td>{% for t in p.topic_tags %}<span class="pill">{{ t }}</span>{% endfor %}</td>
+        <td>{{ p.capture_uuids|length }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}<p class="muted">Nothing yet.</p>{% endif %}
+    <p><a href="{{ url_for('graph') }}">Open the page graph &rarr;</a></p>
+  </div>
+
+  <div class="card">
+    <h2>Recent scans <span class="pill">{{ n_captures }} captures</span></h2>
+    <table>
+      <tr><th>file</th><th>uploaded</th><th>capture</th></tr>
+      {% for s in scans[:15] %}
+      <tr>
+        <td>{{ s.original_name }}</td>
+        <td>{{ s.uploaded_at[:19] | replace('T', ' ') }}</td>
+        <td>{% if s.capture_uuid %}
+          <a href="{{ url_for('capture', capture_uuid=s.capture_uuid) }}">{{ s.capture_uuid | shortuuid }}</a>
+          {% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}

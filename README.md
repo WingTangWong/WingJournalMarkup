@@ -15,6 +15,7 @@ This repository is the **CLI edition**: Python + OpenCV, command-line only for n
 - Normalized page coordinates: [`docs/COORDINATES.md`](docs/COORDINATES.md)
 - Contributing + dev setup: [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
 - Ready-to-print writing sheets: [`samples/`](samples/)
+- Demo web app (upload → structured view → PDF → graph explorer): [`demo/`](demo/)
 
 ## Status
 

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Page graph{% endblock %}
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+{% endblock %}
+{% block body %}
+<h1>Page graph</h1>
+<p class="legend">
+  <span><i style="background:#28468c"></i>page</span>
+  <span><i style="background:#c82828"></i>orphan (no links)</span>
+  <span><i style="background:#148c3c"></i>explicit L/A/B/R link</span>
+  <span><i style="background:#c8c8c8"></i>inferred reciprocal</span>
+  <span><i style="background:#7840a0"></i>same document</span>
+  &nbsp;— scroll to zoom, drag to pan;
+  <label><input type="checkbox" id="spatial"> spatial layout</label>
+</p>
+<div id="cy"></div>
+<div class="card" id="detail"><p class="muted">Click a page.</p></div>
+<script src="{{ url_for('static', filename='graph.js') }}"></script>
+{% endblock %}

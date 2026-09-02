@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Wing Journal Markup{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header>
+  <a class="brand" href="{{ url_for('index') }}">Wing&nbsp;Journal&nbsp;Markup <span>demo</span></a>
+  <nav>
+    <a href="{{ url_for('index') }}">Scans</a>
+    <a href="{{ url_for('graph') }}">Graph</a>
+  </nav>
+</header>
+
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+  <ul class="flash">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
+  {% endif %}
+{% endwith %}
+
+<main>{% block body %}{% endblock %}</main>
+
+<footer>WJM demo &middot; pipeline: <code>wingjournal</code> &middot; store: SQLite + content-addressed blobs</footer>
+</body>
+</html>

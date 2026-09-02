@@ -1,0 +1,5 @@
+# The WJM demo web app. Install the tool + this:
+#   pip install -e ".[ocr]"          # the wingjournal package (+ tesseract extra)
+#   pip install -r demo/requirements.txt
+# and, for text extraction, the system binary:  sudo apt install tesseract-ocr
+flask>=3.0
