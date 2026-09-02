@@ -32,6 +32,16 @@ def persist_ingest(
         raise RuntimeError("failed to encode normalized image")
     capture.normalized_blob = store.put_blob(buf.tobytes())
 
+    # store each literal region's interior as its own blob (spec §16)
+    for asset in capture.literal_assets:
+        x, y, w, h = (int(round(v)) for v in asset["bbox"])
+        pad = max(2, int(min(w, h) * 0.1))
+        crop = normalized_image[y + pad : y + h - pad, x + pad : x + w - pad]
+        if crop.size:
+            ok, cbuf = cv2.imencode(".png", crop)
+            if ok:
+                asset["asset_blob"] = store.put_blob(cbuf.tobytes())
+
     ident = resolve_identity(
         store,
         page_id_machine=page_id_machine,

@@ -162,19 +162,22 @@ disabled *(done, default on this dev box)*.
 
 ---
 
-## M5 – WJM markup parser ⬜
+## M5 – WJM markup parser 🚧
 
 **Goal:** recognized content → typed elements.
 
-- ⬜ Canonical reference enclosure decided and documented (resolves ASSESSMENT §3.2)
+- ✅ Canonical reference enclosure: `-> [#ANCHOR]` / `REF: #ANCHOR`,
+      `document:page:anchor` (`recognition/tags.py`, done in M3; resolves
+      ASSESSMENT §3.2)
+- ✅ Literal-asset detection (`vision/literal_box.py`, spec §16): four solid
+      diagonal corner fills → `LiteralAsset`; interior masked **before** the
+      recognition stages (§36) and stored as its own blob
 - ⬜ Ordinary + segmented box detection → `DiagramNode` (title/body split, spec §14–15)
 - ⬜ Tag scoping rules (tag inside a box belongs to that node, spec §14)
 - ⬜ Bullet-glyph recognition + state vocabulary with per-glyph confidence (spec §18)
 - ⬜ Anchors + references, local / cross-page / cross-document resolution (spec §19)
 - ⬜ Temporal tags `[DUE:]` / `[EVENT:]` / `[RANGE:]` → `TemporalTag` (spec §21)
 - ⬜ Contact blocks → `Contact` (spec §22)
-- ⬜ Literal-asset detection (four diagonal black corners) + interior masking
-      **before** parsing (spec §16, §36)
 
 **Exit criteria:** the canonical page example (spec §40) parses to the expected
 element tree.

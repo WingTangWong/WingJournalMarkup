@@ -111,6 +111,7 @@ class Capture:
     metadata_block: dict | None = None  # detected block geometry
     page_metadata: dict | None = None  # cell text parsed to PageMetadata (when OCR ran)
     text_backend: str | None = None
+    literal_assets: list[dict] = field(default_factory=list)  # escaped image regions (§16)
     detected_elements: list[dict] = field(default_factory=list)
 
     previous_capture_uuid: str | None = None
@@ -120,6 +121,18 @@ class Capture:
     normalized_blob: str | None = None
 
     notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LiteralAsset:
+    """An escaped image region: four diagonal black corner fills (spec §16).
+
+    Its interior is stored as an image and never semantically parsed.
+    """
+
+    bbox: list[float]  # [x, y, w, h] in normalized-page coords
+    confidence: float = 0.0
+    asset_blob: str | None = None  # SHA-256 of the cropped interior, set on persist
 
 
 @dataclass

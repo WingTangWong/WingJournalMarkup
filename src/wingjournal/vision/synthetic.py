@@ -40,12 +40,13 @@ def make_page(
     dict_name: str = DEFAULT_DICT,
     drop_roles: tuple[str, ...] = (),
     blank_roles: tuple[str, ...] = (),
+    literal_box: bool = False,
 ) -> np.ndarray:
     """A white page with four corner ArUco markers and some mock content.
 
     ``drop_roles`` omits markers entirely; ``blank_roles`` replaces them with an
     empty square outline (a blank / damaged sticker - still geometric evidence,
-    spec section 26).
+    spec section 26). ``literal_box`` adds an escaped image region (spec §16).
     """
 
     page = np.full((height, width), 255, dtype=np.uint8)
@@ -79,7 +80,29 @@ def make_page(
     cv2.putText(page, "Vector Database", (margin + 60, by + 70),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, 0, 2, cv2.LINE_AA)
 
+    if literal_box:
+        lx, ly = margin + 40, by + 250
+        lw, lh = width - 2 * margin - 80, height - ly - margin - marker_px - 40
+        draw_literal_box(page, lx, ly, lw, lh)
+
     return cv2.cvtColor(page, cv2.COLOR_GRAY2BGR)
+
+
+def draw_literal_box(page: np.ndarray, x: int, y: int, w: int, h: int) -> None:
+    """A rectangle with solid diagonal black fills in all four corners (spec §16)."""
+
+    cv2.rectangle(page, (x, y), (x + w, y + h), 0, 2)
+    t = max(16, int(min(w, h) * 0.22))
+    for cx, cy, dx, dy in ((x, y, 1, 1), (x + w, y, -1, 1),
+                           (x + w, y + h, -1, -1), (x, y + h, 1, -1)):
+        cv2.fillConvexPoly(
+            page,
+            np.array([[cx, cy], [cx + dx * t, cy], [cx, cy + dy * t]], np.int32),
+            0,
+        )
+    # some "freehand" scribble inside that must never be parsed
+    cv2.line(page, (x + w // 4, y + h // 2), (x + 3 * w // 4, y + h // 3), 0, 3)
+    cv2.circle(page, (x + w // 2, y + 2 * h // 3), h // 8, 0, 3)
 
 
 def warp_page(

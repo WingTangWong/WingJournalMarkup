@@ -21,7 +21,7 @@ src/wingjournal/
   capture/      capture sources (FileSource, DirectorySource, ...)
   vision/       OpenCV front-end: preprocess, aruco, boundary, fiducial_candidates,
                 hypothesis (scorer + iterative select_boundary), envelope,
-                orientation, rectify, debug, synthetic
+                orientation, rectify, literal_box, debug, synthetic
   recognition/  tags (grammar), metadata_block (geometry), metadata (cells->PageMetadata),
                 text/ (TextRecognizer interface, Tesseract backend, null fallback, segment)
   storage/      SQLite + content-addressed blob store; identity resolution

@@ -33,6 +33,7 @@ from wingjournal.recognition.metadata_block import detect_metadata_block
 from wingjournal.vision.aruco import DEFAULT_DICT, detect_markers
 from wingjournal.vision.boundary import best_roles
 from wingjournal.vision.hypothesis import ScoringWeights, select_boundary
+from wingjournal.vision.literal_box import detect_literal_assets, mask_literals
 from wingjournal.vision.orientation import resolve_orientation
 from wingjournal.vision.preprocess import preprocess
 from wingjournal.vision.rectify import rectify
@@ -96,12 +97,17 @@ def ingest_image(
     else:
         normalized, homography = provisional, provisional_h
 
-    metadata_block = detect_metadata_block(normalized)
+    # literal / image regions (spec §16) are detected and masked *before* the
+    # detailed recognition stages so their contents never become elements (§36)
+    literals = detect_literal_assets(normalized)
+    for_parsing = mask_literals(normalized, literals) if literals else normalized
+
+    metadata_block = detect_metadata_block(for_parsing)
     page_metadata = None
     if metadata_block is not None and rec.name != "none":
         from wingjournal.recognition.metadata import read_metadata_block
 
-        reading = read_metadata_block(normalized, metadata_block, rec)
+        reading = read_metadata_block(for_parsing, metadata_block, rec)
         page_metadata = dataclasses.asdict(reading.metadata)
         page_metadata["_confidence"] = reading.confidence
 
@@ -121,6 +127,7 @@ def ingest_image(
         metadata_block=dataclasses.asdict(metadata_block) if metadata_block else None,
         page_metadata=page_metadata,
         text_backend=rec.name,
+        literal_assets=[dataclasses.asdict(a) for a in literals],
         page_hypotheses=hypotheses,
     )
     capture.notes.append(
@@ -133,6 +140,10 @@ def ingest_image(
         capture.notes.append(
             f"metadata block: {len(metadata_block.row1_cells)}+"
             f"{len(metadata_block.row2_cells)} cells (conf {metadata_block.confidence:.2f})"
+        )
+    if literals:
+        capture.notes.append(
+            f"{len(literals)} literal image region(s) detected and masked (spec §16)"
         )
     if not markers and not squares:
         capture.notes.append(

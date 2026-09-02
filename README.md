@@ -37,8 +37,9 @@ the next milestone.
 | SQLite + blob store; `ingest --store`, `show-page`, `history` | ✅ done |
 | Text recognition: `TextRecognizer` + Tesseract backend + null fallback | ✅ done |
 | Metadata cells → `PageMetadata` → page-identity ladder + conflicts | ✅ done |
+| Literal image regions (four-corner mounts): detect, mask, store (spec §16) | ✅ done |
 | Evaluation harness + `--debug` overlays; writing-sheet / legend PDF·PNG | ✅ done |
-| OCR of node bodies / bullets; WJM markup parser | ⬜ next (M4 tail, M5) |
+| Boxes → nodes, bullets, temporal / contact / anchor parsing | ⬜ next (M5) |
 | Diagram graph, semantic graphs, capture reconciliation | ⬜ roadmap |
 
 Synthetic detection numbers (`wingjournal eval --cases 40`): 4-marker boundary
