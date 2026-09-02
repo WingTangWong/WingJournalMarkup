@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wingjournal"
+dynamic = ["version"]
+description = "Wing Journal Markup (WJM) - a paper-native structured information system, CLI edition"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }  # all rights reserved; see README
+authors = [
+    { name = "Wing Tang Wong", email = "wingedpower@gmail.com" },
+    { name = "Evangeline Speite", email = "contact@evangelinespeite.com" },
+]
+keywords = ["opencv", "computer-vision", "bullet-journal", "aruco", "document-scanning"]
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "pillow>=10.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+wingjournal = "wingjournal.cli:main"
+wjm = "wingjournal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "wingjournal.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# WJM runtime output
+/out/
+/captures/
+*.wjm-cache/
+# default CLI artifact names when run without --out (samples/ is committed)
+/wjm-writing-sheet*.pdf
+/wjm-writing-sheet*.png
+/wjm-legend.pdf
+/test-page.png
