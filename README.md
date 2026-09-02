@@ -35,9 +35,10 @@ the next milestone.
 | Segmented metadata-block detection (geometry) | ✅ done |
 | Tag grammar (`#term` / `#[term with spaces]` / references) | ✅ done |
 | SQLite + blob store; `ingest --store`, `show-page`, `history` | ✅ done |
-| Page-identity ladder + conflict model | ✅ done (needs OCR for real ids) |
+| Text recognition: `TextRecognizer` + Tesseract backend + null fallback | ✅ done |
+| Metadata cells → `PageMetadata` → page-identity ladder + conflicts | ✅ done |
 | Evaluation harness + `--debug` overlays; writing-sheet / legend PDF·PNG | ✅ done |
-| OCR / handwriting recognition, WJM markup parser | ⬜ next (M4–M5) |
+| OCR of node bodies / bullets; WJM markup parser | ⬜ next (M4 tail, M5) |
 | Diagram graph, semantic graphs, capture reconciliation | ⬜ roadmap |
 
 Synthetic detection numbers (`wingjournal eval --cases 40`): 4-marker boundary
@@ -56,6 +57,16 @@ pip install -e ".[dev]"
 
 `opencv-python-headless` is pulled in automatically. On a Raspberry Pi / ARM host
 the wheel is available from PyPI; no system build needed.
+
+Text recognition is optional. For it, install the extra **and** the system
+Tesseract binary:
+
+```bash
+pip install -e ".[ocr]"
+sudo apt install tesseract-ocr        # or: brew install tesseract
+```
+
+Without it, `ingest` still runs — metadata cells just come back unread.
 
 ## Usage
 

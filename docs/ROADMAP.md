@@ -131,25 +131,34 @@ full-frame ~0.5 floor)*; documented numbers for the real-photo subset
 - ⬜ Spatial-graph document-membership propagation (moves toward M7)
 
 **Exit criteria:** ingesting the same page twice updates one `Page` with two
-`Capture`s *(mechanism done + tested via `resolve_identity`; end-to-end waits on
-OCR page ids)*; a machine/handwritten ID mismatch produces a stored conflict
-*(done, tested)*.
+`Capture`s *(done — with OCR reading the page id, `ingest --store` twice ->
+one Page; tested in test_ocr_integration.py)*; a machine/handwritten ID mismatch
+produces a stored conflict *(done, tested)*.
 
 ---
 
-## M4 – Handwriting / text recognition ⬜
+## M4 – Handwriting / text recognition 🚧
 
 **Goal:** text regions become strings, with graceful absence.
 
-- ⬜ `TextRecognizer` interface; region → text + per-token confidence + bbox
-- ⬜ Local backend (Tesseract for the printed-ish subset) as default
-- ⬜ Optional hosted-HTR backend behind a flag; local-only mode is always valid
-- ⬜ "Unrecognized text region" fallback element when no backend is available
-- ⬜ Line/word segmentation on the normalized page
+- ✅ `TextRecognizer` interface (`recognition/text/`): region → text + per-word
+      bbox + confidence
+- ✅ Tesseract backend (`text/tesseract.py`) — local, offline; optional
+      (`pip install .[ocr]` + system `tesseract-ocr`). Default recognizer is
+      `auto` (use it if the binary is present, else fall back)
+- ✅ `NullRecognizer` — always available, returns an "unrecognized region"
+      placeholder; the pipeline always completes with recognition disabled
+- ✅ Projection-profile line / word segmentation (`text/segment.py`)
+- ✅ Wired end to end: metadata-block cells → `PageMetadata` → identity
+      resolution; `ingest --recognizer auto|tesseract|none`
+- ⬜ OCR of node bodies / bullet lines / freeform regions (feeds M5)
+- ⬜ Optional hosted-HTR backend behind a flag (interface is ready; not built —
+      local-only stays the default)
+- ⬜ Real phone-photo accuracy numbers (shares #15's blocker)
 
-**Exit criteria:** metadata block + bullet lines from a real photo recognized
-end-to-end with the local backend; pipeline still completes with recognition
-disabled.
+**Exit criteria:** metadata block recognized end to end with the local backend
+*(done, CI installs tesseract)*; pipeline still completes with recognition
+disabled *(done, default on this dev box)*.
 
 ---
 

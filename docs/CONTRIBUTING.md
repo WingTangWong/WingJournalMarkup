@@ -22,7 +22,8 @@ src/wingjournal/
   vision/       OpenCV front-end: preprocess, aruco, boundary, fiducial_candidates,
                 hypothesis (scorer + iterative select_boundary), envelope,
                 orientation, rectify, debug, synthetic
-  recognition/  tags (grammar), metadata_block (geometry); OCR-fed parsing lands M4
+  recognition/  tags (grammar), metadata_block (geometry), metadata (cells->PageMetadata),
+                text/ (TextRecognizer interface, Tesseract backend, null fallback, segment)
   storage/      SQLite + content-addressed blob store; identity resolution
   templates/    printable PDF / PNG: geometry, writing_sheet, legend
   eval/         evaluation harness: corpus, metrics, harness

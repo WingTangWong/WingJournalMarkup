@@ -52,7 +52,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     try:
         results = ingest_path(
             args.path, args.out, dict_name=args.dict, recursive=args.recursive,
-            weights=weights, debug=args.debug, store=store,
+            weights=weights, debug=args.debug, store=store, recognizer=args.recognizer,
         )
     finally:
         if store is not None:
@@ -72,6 +72,10 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         )
         for note in cap.notes:
             print(f"    - {note}")
+        md = cap.page_metadata
+        if md and any(md.get(k) for k in ("document_id", "page_id", "topic_tags")):
+            print(f"    - metadata (via {cap.text_backend}): doc={md.get('document_id')} "
+                  f"page={md.get('page_id')} topics={md.get('topic_tags')}")
     return 0
 
 
@@ -225,6 +229,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--recursive", action="store_true", help="recurse into subdirectories")
     p_ingest.add_argument("--weights", help="JSON file of hypothesis scoring weights")
     p_ingest.add_argument("--store", help="persist captures into this WJM store directory")
+    p_ingest.add_argument(
+        "--recognizer", default="auto", choices=("auto", "tesseract", "none"),
+        help="text recognizer for metadata cells (auto: use tesseract if installed)",
+    )
     p_ingest.add_argument(
         "--debug", action="store_true", help="write vision overlays to <out>/debug"
     )

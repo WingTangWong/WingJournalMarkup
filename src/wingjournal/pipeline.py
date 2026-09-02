@@ -77,7 +77,11 @@ def ingest_image(
     source_type: str = "file",
     raw_path: str | None = None,
     weights: ScoringWeights | None = None,
+    recognizer: str = "auto",
 ) -> IngestResult:
+    from wingjournal.recognition.text import get_recognizer
+
+    rec = get_recognizer(recognizer)
     pre = preprocess(image)
     markers = detect_markers(pre.gray, dict_name)
 
@@ -93,6 +97,13 @@ def ingest_image(
         normalized, homography = provisional, provisional_h
 
     metadata_block = detect_metadata_block(normalized)
+    page_metadata = None
+    if metadata_block is not None and rec.name != "none":
+        from wingjournal.recognition.metadata import read_metadata_block
+
+        reading = read_metadata_block(normalized, metadata_block, rec)
+        page_metadata = dataclasses.asdict(reading.metadata)
+        page_metadata["_confidence"] = reading.confidence
 
     capture = Capture(
         source_type=source_type,
@@ -108,6 +119,8 @@ def ingest_image(
         detected_fiducials=markers,
         inferred_fiducials=_decoded_candidates(markers, boundary) + squares,
         metadata_block=dataclasses.asdict(metadata_block) if metadata_block else None,
+        page_metadata=page_metadata,
+        text_backend=rec.name,
         page_hypotheses=hypotheses,
     )
     capture.notes.append(
@@ -144,6 +157,7 @@ def ingest_path(
     weights: ScoringWeights | None = None,
     debug: bool = False,
     store=None,
+    recognizer: str = "auto",
 ) -> list[IngestResult]:
     src: CaptureSource = source_for(path, recursive=recursive)
     out_dir = Path(out_dir)
@@ -154,7 +168,7 @@ def ingest_path(
     for name, image in src:
         result = ingest_image(
             name, image, dict_name=dict_name, source_type=src.source_type,
-            raw_path=str(path), weights=weights,
+            raw_path=str(path), weights=weights, recognizer=recognizer,
         )
         norm_path = out_dir / "normalized" / f"{name}.png"
         cv2.imwrite(str(norm_path), result.normalized_image)
@@ -164,9 +178,13 @@ def ingest_path(
             from wingjournal.storage import persist_ingest
 
             ok, buf = cv2.imencode(".png", result.raw_image)
+            md = result.capture.page_metadata or {}
             persist_ingest(
                 store, result.capture, result.normalized_image,
                 buf.tobytes() if ok else b"",
+                page_id_explicit=md.get("page_id"),
+                topic_tags=md.get("topic_tags") or None,
+                document_id_explicit=md.get("document_id"),
             )
 
         cap_path = out_dir / "captures" / f"{name}.json"

@@ -21,10 +21,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ocr = [
+    "pytesseract>=0.3.10",  # also needs the system `tesseract-ocr` binary
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.6",
+    "pytesseract>=0.3.10",
 ]
 
 [project.scripts]

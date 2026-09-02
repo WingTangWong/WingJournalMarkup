@@ -108,7 +108,9 @@ class Capture:
 
     detected_fiducials: list[DetectedMarker] = field(default_factory=list)
     inferred_fiducials: list[FiducialCandidate] = field(default_factory=list)
-    metadata_block: dict | None = None  # geometry only until OCR (M4)
+    metadata_block: dict | None = None  # detected block geometry
+    page_metadata: dict | None = None  # cell text parsed to PageMetadata (when OCR ran)
+    text_backend: str | None = None
     detected_elements: list[dict] = field(default_factory=list)
 
     previous_capture_uuid: str | None = None
