@@ -1,0 +1,10 @@
+# vendor/opencv.js IS committed so the demo runs from GitHub Pages with no CDN.
+# Ignore anything else that lands in vendor/.
+vendor/*
+!vendor/opencv.js
+
+# Throwaway TLS certs for on-device testing
+*.pem
+
+# scratch / local test files
+_*

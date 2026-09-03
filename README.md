@@ -16,6 +16,9 @@ This repository is the **CLI edition**: Python + OpenCV, command-line only for n
 - Contributing + dev setup: [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
 - Ready-to-print writing sheets: [`samples/`](samples/)
 - Demo web app (upload → structured view → PDF → graph explorer): [`demo/`](demo/)
+- Mobile capture demo — camera → auto-shoot when 4 markers are framed → rectified
+  page, all on-device (OpenCV.js / WASM): [`MobileDeviceDemo/`](MobileDeviceDemo/)
+  · [**live**](https://wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/)
 
 ## Status
 

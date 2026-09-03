@@ -51,6 +51,26 @@ help a person produce scannable pages.
 
 ---
 
+## D2 – Mobile capture demo ✅
+
+**Goal:** a phone-first capture front-end that auto-shoots when a sheet is framed.
+
+- ✅ `MobileDeviceDemo/` — static web app, no build step; OpenCV.js (WASM) +
+      ArUco (`DICT_4X4_50`) in a Web Worker so the 11 MB compile and the
+      per-frame detection never stall the camera preview
+- ✅ Live camera + guide overlay; auto-capture when marker ids 0/1/2/3 all sit
+      inside the guide and hold ~450 ms (or a manual shutter)
+- ✅ On capture: full-res photo **+** perspective-rectified page (mirrors
+      `wingjournal.vision.{aruco,boundary,rectify}` — outer-corner page quad,
+      1600 px long side, aspect clamp) **+** a JSON marker sidecar, all
+      downloadable
+- ✅ `vendor/opencv.js` committed; deployed on GitHub Pages
+      (`wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/`);
+      `serve.py` (HTTP / HTTPS) for local / LAN
+- ⬜ Feed a capture straight into `ingest` / the store; batch mode
+
+---
+
 ## M0 – Project scaffold ✅
 
 **Goal:** a runnable, tested Python package and a public repo.

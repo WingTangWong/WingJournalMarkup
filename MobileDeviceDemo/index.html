@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
+<title>WJM Capture</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- live camera -->
+  <video id="video" playsinline muted autoplay></video>
+
+  <!-- guide + marker overlay, drawn each frame -->
+  <canvas id="overlay"></canvas>
+
+  <!-- top status strip -->
+  <header id="hud">
+    <div id="status" class="status">Loading the vision engine&hellip;</div>
+    <div id="roles" class="roles" aria-hidden="true">
+      <span class="pip" data-role="TOP_LEFT">TL</span>
+      <span class="pip" data-role="TOP_RIGHT">TR</span>
+      <span class="pip" data-role="BOTTOM_RIGHT">BR</span>
+      <span class="pip" data-role="BOTTOM_LEFT">BL</span>
+    </div>
+  </header>
+
+  <!-- bottom controls -->
+  <footer id="controls">
+    <button id="btn-torch"  class="ctl" type="button" hidden>Torch</button>
+    <button id="btn-shutter" class="shutter" type="button" aria-label="Capture">
+      <span class="ring"></span>
+    </button>
+    <button id="btn-flip"   class="ctl" type="button">Flip</button>
+    <label id="auto-toggle" class="auto">
+      <input id="chk-auto" type="checkbox" checked> Auto
+    </label>
+  </footer>
+
+  <!-- capture flash -->
+  <div id="flash"></div>
+
+  <!-- start / permission gate -->
+  <div id="gate" class="sheet">
+    <div class="sheet-inner">
+      <h1>WJM&nbsp;Capture</h1>
+      <p>Hold a Wing Journal Markup sheet inside the frame. The photo is taken
+         automatically the moment all four corner markers sit within the guide.</p>
+      <button id="btn-start" class="primary" type="button" disabled>
+        Loading&hellip;
+      </button>
+      <p class="fine" id="gate-fine">
+        Needs camera access. Everything runs on-device &mdash; no upload.
+      </p>
+    </div>
+  </div>
+
+  <!-- result -->
+  <div id="result" class="sheet" hidden>
+    <div class="sheet-inner result-inner">
+      <h2>Captured</h2>
+      <div class="shots">
+        <figure><figcaption>Photo</figcaption><img id="shot-raw" alt="captured photo"></figure>
+        <figure id="fig-rect"><figcaption>Rectified page</figcaption><img id="shot-rect" alt="rectified page"></figure>
+      </div>
+      <div id="result-meta" class="meta"></div>
+      <div class="result-actions">
+        <a id="dl-raw"  class="primary" download>Save photo</a>
+        <a id="dl-rect" class="ctl"     download>Save rectified</a>
+        <a id="dl-json" class="ctl"     download>Save data</a>
+        <button id="btn-retake" class="ctl" type="button">Retake</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="fatal" class="sheet" hidden>
+    <div class="sheet-inner">
+      <h2>Can&rsquo;t start</h2>
+      <p id="fatal-msg"></p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // Ordered list of OpenCV.js builds to try. The first that loads wins.
+  // A vendored copy (see fetch-opencv.sh) keeps the app working offline.
+  window.OPENCV_URLS = [
+    "vendor/opencv.js",
+    "https://docs.opencv.org/4.x/opencv.js"
+  ];
+</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
