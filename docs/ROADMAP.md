@@ -53,21 +53,30 @@ help a person produce scannable pages.
 
 ## D2 – Mobile capture demo ✅
 
-**Goal:** a phone-first capture front-end that auto-shoots when a sheet is framed.
+**Goal:** a phone-first front-end that auto-shoots a framed sheet and extracts
+its structure on-device. Development is CLI-first; this is a port of it — see the
+stage-for-stage map in `MobileDeviceDemo/README.md`.
 
 - ✅ `MobileDeviceDemo/` — static web app, no build step; OpenCV.js (WASM) +
       ArUco (`DICT_4X4_50`) in a Web Worker so the 11 MB compile and the
       per-frame detection never stall the camera preview
 - ✅ Live camera + guide overlay; auto-capture when marker ids 0/1/2/3 all sit
       inside the guide and hold ~450 ms (or a manual shutter)
-- ✅ On capture: full-res photo **+** perspective-rectified page (mirrors
-      `wingjournal.vision.{aruco,boundary,rectify}` — outer-corner page quad,
-      1600 px long side, aspect clamp) **+** a JSON marker sidecar, all
-      downloadable
-- ✅ `vendor/opencv.js` committed; deployed on GitHub Pages
+- ✅ **Extraction at parity with `wingjournal ingest --parse-body`**: rectify →
+      literal-region detect + mask (§16) → metadata-block grid → Tesseract.js
+      OCR of the cells and body lines → `wjm-parse` (bullets/tags/temporal/
+      references/contacts). `js/vision-core.js` ports
+      `vision.{aruco,boundary,rectify}` + `recognition.{metadata_block,segment}`
+      + `vision.literal_box`; `js/wjm-parse.js` ports `recognition.{tags,parse}`
+- ✅ Output: full-res photo **+** rectified page **+** a Capture-shaped JSON with
+      `metadata_block`, `page_metadata`, `detected_elements` (each with a
+      normalized-page `bbox`), `literal_assets`, provenance — all downloadable
+- ✅ `vendor/opencv.js` + `vendor/tesseract/` committed; deployed on GitHub Pages
       (`wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/`);
-      `serve.py` (HTTP / HTTPS) for local / LAN
-- ⬜ Feed a capture straight into `ingest` / the store; batch mode
+      `serve.py` (HTTP / HTTPS) for local / LAN; `tests/*.mjs` re-run the Python
+      grammar tests + smoke-test the detectors
+- ⬜ Rebuild a PDF / SVG from the element tree; feed a capture straight into
+      `ingest` / the store; batch mode
 
 ---
 
@@ -279,3 +288,6 @@ one document; a relationship contradiction is reported, not hidden.
 - Config file for tunable weights/thresholds
 - Docs kept in step with behaviour
 - Every automated commit pair-programmed and attributed (see CONTRIBUTING)
+- **CLI-first, then port.** New extraction work lands in `src/wingjournal/` with
+  tests; once it settles it is ported to `MobileDeviceDemo/` (JS/WASM) to keep
+  the demo at parity. The demo mirrors module for module — see its README.

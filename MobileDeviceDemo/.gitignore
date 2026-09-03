@@ -1,7 +1,8 @@
-# vendor/opencv.js IS committed so the demo runs from GitHub Pages with no CDN.
-# Ignore anything else that lands in vendor/.
+# The vision + OCR WASM engines are committed so the demo runs from the repo /
+# GitHub Pages with no external calls. Ignore anything else dropped in vendor/.
 vendor/*
 !vendor/opencv.js
+!vendor/tesseract/
 
 # Throwaway TLS certs for on-device testing
 *.pem

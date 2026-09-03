@@ -1,64 +1,68 @@
-/* WJM detection worker (classic worker).
+/* WJM vision worker (classic worker).
  *
- * Keeps the 11 MB OpenCV.js WASM compile and every per-frame detection off the
- * main thread, so the camera preview and overlay never stutter.
+ * OpenCV.js (WASM) + ArUco + all the *geometric* extraction run here, so the
+ * camera preview and overlay on the main thread never stutter. Text recognition
+ * (Tesseract.js) runs on the main thread — it manages its own worker and needs a
+ * canvas it can't get here.
  *
  * Protocol
  *   main → { type:"init", opencvUrls:[...] }
  *   ←    { type:"ready", hasAruco } | { type:"error", message }
- *   main → { type:"detect",  seq, width, height, buffer }        // RGBA, buffer transferred
+ *   main → { type:"detect",  seq, width, height, buffer }         // live frame, RGBA transferred
  *   ←    { type:"markers",  seq, markers }
- *   main → { type:"rectify", seq, width, height, buffer, markers }  // RGBA
- *   ←    { type:"rectified", seq, width, height, buffer, quad } | { type:"rectified", seq, quad:null }
+ *   main → { type:"analyze", seq, width, height, buffer, markers } // full-res capture, RGBA
+ *   ←    { type:"progress", seq, stage }
+ *   ←    { type:"analyzed", seq, geometry, rectified:{buffer,width,height} }
+ *   ←    { type:"analyzed", seq, error }
+ *
+ * The chain mirrors wingjournal.pipeline.ingest_image from perspective
+ * normalization onward (markers already give the page frame + orientation):
+ *   rectify → literal-region detect + mask → metadata-block detect
+ *   → text-line segmentation.  OCR + element parsing happen on the main thread.
  */
 "use strict";
 
 let cv = null;
-let V = null;
+let V = null;   // WJMVision
 let detector = null;
+
+const TARGET_LONG_PX = 1600;
 
 self.onmessage = (e) => {
   const msg = e.data;
   try {
-    if (msg.type === "init") return void init(msg.opencvUrls);
+    if (msg.type === "init") return void init(msg);
     if (msg.type === "detect") return void onDetect(msg);
-    if (msg.type === "rectify") return void onRectify(msg);
+    if (msg.type === "analyze") return void onAnalyze(msg);
   } catch (err) {
-    post({ type: "error", message: String(err && err.message || err) });
+    post({ type: "error", message: String((err && err.message) || err) });
   }
 };
 
-function post(obj, transfer) {
-  self.postMessage(obj, transfer || []);
-}
+const post = (obj, transfer) => self.postMessage(obj, transfer || []);
+const here = (rel) => new URL(rel, self.location.href).href;
 
-async function init(opencvUrls) {
+async function init(msg) {
   let loaded = null;
-  for (const url of opencvUrls) {
+  for (const url of msg.opencvUrls) {
     try {
-      self.cv = {}; // classic-build Module seed
+      self.cv = {};
       importScripts(url);
       await waitForRuntime();
       loaded = url;
       break;
-    } catch (err) {
-      // try the next candidate
-    }
+    } catch (err) { /* try next */ }
   }
-  if (!loaded) {
-    return post({ type: "error", message: "could not load any OpenCV.js build" });
-  }
+  if (!loaded) return post({ type: "error", message: "could not load any OpenCV.js build" });
   cv = self.cv;
 
-  importScripts(new URL("vision-core.js", self.location.href).href);
+  importScripts(here("vision-core.js"));
   V = self.WJMVision;
 
   if (!V.hasAruco(cv)) {
     return post({
       type: "error",
-      message:
-        "This OpenCV.js build has no ArUco bindings. Vendor an objdetect-enabled " +
-        "build to vendor/opencv.js (see README / fetch-opencv.sh).",
+      message: "This OpenCV.js build has no ArUco bindings (see README / fetch-opencv.sh).",
     });
   }
   detector = new V.MarkerDetector(cv);
@@ -80,45 +84,76 @@ function waitForRuntime() {
   });
 }
 
-function matFromBuffer(buffer, width, height) {
-  return cv.matFromImageData({
-    data: new Uint8ClampedArray(buffer),
-    width,
-    height,
-  });
-}
+const matFromBuffer = (buffer, width, height) =>
+  cv.matFromImageData({ data: new Uint8ClampedArray(buffer), width, height });
+
+const grayOf = (rgba) => {
+  const g = new cv.Mat();
+  cv.cvtColor(rgba, g, cv.COLOR_RGBA2GRAY);
+  return g;
+};
+const round3 = (v) => Math.round(v * 1000) / 1000;
 
 function onDetect({ seq, width, height, buffer }) {
   if (!detector) return post({ type: "markers", seq, markers: [] });
   const src = matFromBuffer(buffer, width, height);
-  const gray = new cv.Mat();
+  const gray = grayOf(src);
   let markers = [];
-  try {
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    markers = detector.detect(gray);
-  } finally {
-    src.delete();
-    gray.delete();
-  }
+  try { markers = detector.detect(gray); }
+  finally { src.delete(); gray.delete(); }
   post({ type: "markers", seq, markers });
 }
 
-function onRectify({ seq, width, height, buffer, markers }) {
-  const quad = V.pageQuadFromMarkers(markers || []);
-  if (!quad) return post({ type: "rectified", seq, quad: null });
-
-  const src = matFromBuffer(buffer, width, height);
+function onAnalyze({ seq, width, height, buffer, markers }) {
+  const progress = (stage) => post({ type: "progress", seq, stage });
+  const trash = [];
+  const keep = (m) => { trash.push(m); return m; };
   try {
-    const { mat, width: rw, height: rh } = V.rectify(cv, src, quad);
-    const out = new Uint8ClampedArray(mat.data); // copy out of the WASM heap
-    mat.delete();
+    const quad = V.pageQuadFromMarkers(markers || []);
+    if (!quad) return post({ type: "analyzed", seq, error: "need all four corner markers to normalize the page" });
+
+    progress("rectify");
+    const src = keep(matFromBuffer(buffer, width, height));
+    const { mat: normalized, width: nw, height: nh } = V.rectify(cv, src, quad);
+    keep(normalized);
+
+    progress("literal regions");
+    const grayN = keep(grayOf(normalized));
+    const literals = V.detectLiteralAssets(cv, grayN);
+    const forParsing = keep(normalized.clone());
+    if (literals.length) V.maskLiterals(cv, forParsing, literals);
+    const grayMasked = keep(grayOf(forParsing));
+
+    progress("metadata block");
+    const block = V.detectMetadataBlock(cv, grayMasked);
+
+    progress("segmenting text");
+    const skipTop = block ? (block.bbox[1] + block.bbox[3]) / nh : 0;
+    const lineBoxes = V.segmentLines(cv, grayMasked).filter(([, y]) => y >= skipTop * nh);
+
+    const rectBuf = new Uint8ClampedArray(normalized.data);
+    const geometry = {
+      dictionary: "DICT_4X4_50",
+      source: { width, height },
+      page_frame_quad: quad.map(([x, y]) => [round3(x), round3(y)]),
+      orientation: { method: "aruco_ids", degrees: 0 },
+      normalized: { width: nw, height: nh, target_long_px: TARGET_LONG_PX },
+      detected_fiducials: (markers || []).map((m) => ({
+        id: m.id, role: m.role,
+        corners: m.corners.map(([x, y]) => [round3(x), round3(y)]),
+        center: m.center.map(round3),
+      })),
+      metadata_block: block,
+      literal_assets: literals,
+      line_boxes: lineBoxes,
+    };
     post(
-      { type: "rectified", seq, width: rw, height: rh, buffer: out.buffer, quad },
-      [out.buffer],
+      { type: "analyzed", seq, geometry, rectified: { buffer: rectBuf.buffer, width: nw, height: nh } },
+      [rectBuf.buffer],
     );
   } catch (err) {
-    post({ type: "rectified", seq, quad: null, error: String(err && err.message || err) });
+    post({ type: "analyzed", seq, error: String((err && err.stack) || err) });
   } finally {
-    src.delete();
+    for (const m of trash) { try { m.delete(); } catch (e) { /* */ } }
   }
 }

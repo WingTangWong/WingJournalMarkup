@@ -147,10 +147,290 @@
     return { mat: out, width: w, height: h };
   }
 
+  // ===================================================================
+  //  Geometric recognition — ports of
+  //    src/wingjournal/recognition/metadata_block.py
+  //    src/wingjournal/recognition/text/segment.py
+  //    src/wingjournal/vision/literal_box.py
+  //  Every function takes an already-grayscale single-channel cv.Mat.
+  // ===================================================================
+
+  function adaptiveInv(C, gray) {
+    const b = new C.Mat();
+    C.adaptiveThreshold(gray, b, 255, C.ADAPTIVE_THRESH_GAUSSIAN_C, C.THRESH_BINARY_INV, 35, 11);
+    return b;
+  }
+
+  /** column sums (dim 0) or row sums (dim 1) over a rect, as a plain Array of counts */
+  function projection(C, mask, rect, dim) {
+    const roi = mask.roi(rect);
+    const out = new C.Mat();
+    const REDUCE_SUM = typeof C.REDUCE_SUM === "number" ? C.REDUCE_SUM : 0;
+    C.reduce(roi, out, dim, REDUCE_SUM, C.CV_32S);
+    const arr = Array.from(out.data32S, (v) => v / 255); // mask is 0/255 -> counts
+    roi.delete();
+    out.delete();
+    return arr;
+  }
+
+  // metadata_block._line_mask
+  function lineMask(C, binary, horizontal, scale = 20) {
+    const len = Math.max(8, Math.floor((horizontal ? binary.cols : binary.rows) / scale));
+    const kernel = C.getStructuringElement(
+      C.MORPH_RECT, horizontal ? new C.Size(len, 1) : new C.Size(1, len),
+    );
+    const eroded = new C.Mat();
+    const out = new C.Mat();
+    C.erode(binary, eroded, kernel);
+    C.dilate(eroded, out, kernel);
+    kernel.delete();
+    eroded.delete();
+    return out;
+  }
+
+  // metadata_block._positions — centres of the "on" runs of a profile
+  function profilePositions(profile, minFrac = 0.4) {
+    const peak = Math.max(0, ...profile);
+    const thr = peak ? peak * minFrac : 1;
+    const on = profile.map((v) => v > thr);
+    const runs = [];
+    let start = null;
+    for (let i = 0; i < on.length; i++) {
+      if (on[i] && start === null) start = i;
+      else if (!on[i] && start !== null) { runs.push((start + i - 1) >> 1); start = null; }
+    }
+    if (start !== null) runs.push((start + on.length - 1) >> 1);
+    return runs;
+  }
+
+  // metadata_block._row_cells
+  function rowCells(C, vertical, bx, bw, y0, y1, minCell) {
+    const prof = projection(C, vertical, new C.Rect(bx, y0, bw, y1 - y0), 0);
+    const set = new Set([bx, bx + bw]);
+    for (const p of profilePositions(prof)) set.add(bx + p);
+    const xs = [...set].sort((a, b) => a - b);
+    const cells = [];
+    for (let i = 0; i < xs.length - 1; i++) {
+      const w = xs[i + 1] - xs[i];
+      if (w >= minCell) cells.push([xs[i], y0, w, y1 - y0]);
+    }
+    return cells;
+  }
+
+  /**
+   * detect_metadata_block — the ruled 2-row title box near the top of the page.
+   * @returns {{bbox:number[], row_divider_y:number, row1_cells:number[][],
+   *            row2_cells:number[][], confidence:number} | null}
+   */
+  function detectMetadataBlock(C, gray, searchFrac = 0.42) {
+    const h = gray.rows;
+    const w = gray.cols;
+    const topH = Math.max(1, Math.floor(h * searchFrac));
+    const top = gray.roi(new C.Rect(0, 0, w, topH));
+    const binary = adaptiveInv(C, top);
+    const horizontal = lineMask(C, binary, true);
+    const vertical = lineMask(C, binary, false);
+    const grid = new C.Mat();
+    C.bitwise_or(horizontal, vertical, grid);
+
+    const contours = new C.MatVector();
+    const hierarchy = new C.Mat();
+    C.findContours(grid, contours, hierarchy, C.RETR_EXTERNAL, C.CHAIN_APPROX_SIMPLE);
+
+    let best = null;
+    for (let i = 0; i < contours.size(); i++) {
+      const c = contours.get(i);
+      const r = C.boundingRect(c);
+      c.delete();
+      if (r.width < 0.55 * w || r.height < 0.02 * h) continue;
+      const ar = r.width / Math.max(r.height, 1);
+      if (ar < 2.0 || ar > 24.0) continue;
+      if (!best || r.width * r.height > best.width * best.height) best = r;
+    }
+
+    let result = null;
+    if (best) {
+      const { x: bx, y: by, width: bw, height: bh } = best;
+      const m = Math.max(2, bh >> 3);
+      const rowProfile = projection(C, horizontal, new C.Rect(bx, by + m, bw, Math.max(1, bh - 2 * m)), 1);
+      const peak = Math.max(0, ...rowProfile);
+      const dividerY = peak > 0
+        ? by + m + rowProfile.indexOf(peak)
+        : Math.round(by + bh / 2);
+
+      const minCell = 0.04 * bw;
+      const r1 = rowCells(C, vertical, bx, bw, by, dividerY, minCell);
+      const r2 = rowCells(C, vertical, bx, bw, dividerY, by + bh, minCell);
+      const cellScore = 0.5 * (r1.length === 3) + 0.5 * (r2.length === 4);
+      const widthScore = Math.min(1.0, bw / (0.85 * w));
+      result = {
+        bbox: [bx, by, bw, bh],
+        row_divider_y: dividerY,
+        row1_cells: r1,
+        row2_cells: r2,
+        confidence: Math.round((0.4 + 0.4 * cellScore + 0.2 * widthScore) * 1000) / 1000,
+      };
+    }
+
+    top.delete(); binary.delete(); horizontal.delete(); vertical.delete();
+    grid.delete(); contours.delete(); hierarchy.delete();
+    return result;
+  }
+
+  // ---- segment.py ---------------------------------------------------
+
+  // segment._runs — 1D run extraction with a gap tolerance
+  function runs1d(on, minGap, minLen) {
+    const out = [];
+    let start = null;
+    let gap = 0;
+    for (let i = 0; i < on.length; i++) {
+      if (on[i]) { if (start === null) start = i; gap = 0; }
+      else if (start !== null) {
+        gap += 1;
+        if (gap > minGap) {
+          if (i - gap - start >= minLen) out.push([start, i - gap]);
+          start = null;
+        }
+      }
+    }
+    if (start !== null && on.length - start >= minLen) out.push([start, on.length]);
+    return out;
+  }
+
+  /** segment_lines — text-line bounding boxes [x,y,w,h], top to bottom */
+  function segmentLines(C, gray, minLineH = 6) {
+    const binary = adaptiveInv(C, gray);
+    const h = binary.rows;
+    const w = binary.cols;
+    const rowInk = projection(C, binary, new C.Rect(0, 0, w, h), 1);
+    const thr = Math.max(1, 0.01 * w);
+    const bands = runs1d(rowInk.map((v) => v > thr), Math.max(2, Math.floor(h / 60)), minLineH);
+    const out = [];
+    for (const [y0, y1] of bands) {
+      const cols = projection(C, binary, new C.Rect(0, y0, w, y1 - y0), 0);
+      let x0 = -1;
+      let x1 = -1;
+      for (let i = 0; i < cols.length; i++) if (cols[i] > 0) { if (x0 < 0) x0 = i; x1 = i; }
+      if (x0 < 0) continue;
+      out.push([x0, y0, x1 - x0 + 1, y1 - y0]);
+    }
+    binary.delete();
+    return out;
+  }
+
+  // ---- literal_box.py ---------------------------------------------
+
+  function patchMean(data, cols, rows, cx, cy, half) {
+    const x0 = Math.max(0, cx - half);
+    const x1 = Math.min(cols, cx + half);
+    const y0 = Math.max(0, cy - half);
+    const y1 = Math.min(rows, cy + half);
+    if (x1 <= x0 || y1 <= y0) return 0;
+    let on = 0;
+    let n = 0;
+    for (let y = y0; y < y1; y++) {
+      const base = y * cols;
+      for (let x = x0; x < x1; x++) { if (data[base + x] > 0) on++; n++; }
+    }
+    return n ? on / n : 0;
+  }
+
+  function cornerScores(data, cols, rows, x, y, bw, bh, size) {
+    const half = Math.max(2, size >> 1);
+    const inward = Math.max(3, Math.floor(size * 0.8));
+    const wedgeHalf = Math.max(2, Math.floor(size / 3));
+    const corners = [
+      [x, y, 1, 1], [x + bw, y, -1, 1], [x + bw, y + bh, -1, -1], [x, y + bh, 1, -1],
+    ];
+    let minTip = Infinity;
+    let minWedge = Infinity;
+    for (const [cx, cy, dx, dy] of corners) {
+      minTip = Math.min(minTip, patchMean(data, cols, rows, cx + dx * half, cy + dy * half, half));
+      minWedge = Math.min(minWedge, patchMean(data, cols, rows, cx + dx * inward, cy + dy * inward, wedgeHalf));
+    }
+    return [minTip, minWedge];
+  }
+
+  /**
+   * detect_literal_assets — rectangles with four solid diagonal corner fills.
+   * @returns {{bbox:number[], confidence:number}[]}
+   */
+  function detectLiteralAssets(C, gray, opts = {}) {
+    const {
+      minAreaFrac = 0.004, cornerFrac = 0.09,
+      minTipFill = 0.5, minWedgeFill = 0.3, maxEdgeFill = 0.3,
+    } = opts;
+    const h = gray.rows;
+    const w = gray.cols;
+
+    const edges = adaptiveInv(C, gray);
+    const binary = new C.Mat();
+    C.threshold(gray, binary, 0, 255, C.THRESH_BINARY_INV | C.THRESH_OTSU);
+    const bdata = binary.data;
+
+    const contours = new C.MatVector();
+    const hierarchy = new C.Mat();
+    C.findContours(edges, contours, hierarchy, C.RETR_LIST, C.CHAIN_APPROX_SIMPLE);
+
+    const cand = [];
+    for (let i = 0; i < contours.size(); i++) {
+      const c = contours.get(i);
+      cand.push({ area: C.contourArea(c), rect: C.boundingRect(c) });
+      c.delete();
+    }
+    cand.sort((a, b) => b.area - a.area);
+
+    const out = [];
+    const seen = [];
+    for (const { area, rect } of cand) {
+      if (area < minAreaFrac * h * w || area > 0.9 * h * w) continue;
+      const { x, y, width: bw, height: bh } = rect;
+      if (bw < 0.08 * w || bh < 0.08 * h) continue;
+      if (seen.some(([sx, sy]) => Math.abs(x - sx) < 15 && Math.abs(y - sy) < 15)) continue;
+
+      const size = Math.max(4, Math.floor(Math.min(bw, bh) * cornerFrac));
+      const [tip, wedge] = cornerScores(bdata, w, h, x, y, bw, bh, size);
+      if (tip < minTipFill || wedge < minWedgeFill) continue;
+      const edge = Math.max(
+        patchMean(bdata, w, h, x + (bw >> 1), y, size),
+        patchMean(bdata, w, h, x + (bw >> 1), y + bh, size),
+        patchMean(bdata, w, h, x, y + (bh >> 1), size),
+        patchMean(bdata, w, h, x + bw, y + (bh >> 1), size),
+      );
+      if (edge > maxEdgeFill) continue;
+
+      seen.push([x, y]);
+      out.push({
+        bbox: [x, y, bw, bh],
+        confidence: Math.round(Math.min(1, 0.5 * tip + 0.5 * wedge) * (1 - edge) * 1000) / 1000,
+      });
+    }
+
+    edges.delete(); binary.delete(); contours.delete(); hierarchy.delete();
+    return out;
+  }
+
+  // literal_box.mask_literals — blank each literal interior on an RGBA image
+  function maskLiterals(C, rgbaMat, assets, fill = 255) {
+    for (const a of assets) {
+      const [x, y, w, h] = a.bbox.map((v) => Math.round(v));
+      const pad = Math.max(2, Math.floor(Math.min(w, h) * 0.12));
+      C.rectangle(
+        rgbaMat,
+        new C.Point(x + pad, y + pad),
+        new C.Point(x + w - pad, y + h - pad),
+        new C.Scalar(fill, fill, fill, 255),
+        -1,
+      );
+    }
+  }
+
   root.WJMVision = {
     ROLE_BY_ID, ROLE_ORDER, TARGET_LONG_PX,
     hasAruco, MarkerDetector, pageQuadFromMarkers, outputSize, rectify, dist,
+    detectMetadataBlock, segmentLines, detectLiteralAssets, maskLiterals,
   };
 })(typeof self !== "undefined" ? self : globalThis);
 
-if (typeof module !== "undefined" && module.exports) module.exports = self.WJMVision;
+if (typeof module !== "undefined" && module.exports) module.exports = globalThis.WJMVision;

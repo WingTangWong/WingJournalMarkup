@@ -1,12 +1,22 @@
 // WJM MobileDeviceDemo — auto-capture a page the moment its four corner markers
-// sit inside the on-screen guide.
+// sit inside the on-screen guide, then extract its structure.
 //
-// The camera preview, overlay and UI run on the main thread; OpenCV.js (WASM)
-// and every ArUco detection run in js/worker.js, so nothing here ever blocks.
+// The camera preview, overlay and UI run here on the main thread. OpenCV.js
+// (WASM) + ArUco + the geometric extraction run in js/worker.js; Tesseract.js
+// OCR runs from here (it manages its own worker). js/wjm-parse.js (loaded as a
+// classic script) turns recognized text into typed elements.
+
+import { getRecognizer } from "./ocr.js";
 
 const OPENCV_URLS = (window.OPENCV_URLS || ["vendor/opencv.js"]).map(
   (u) => new URL(u, location.href).href,
 );
+const TESSERACT_PATHS = {
+  tesseractJs: new URL("vendor/tesseract/tesseract.min.js", location.href).href,
+  workerPath: new URL("vendor/tesseract/worker.min.js", location.href).href,
+  corePath: new URL("vendor/tesseract/tesseract-core-simd-lstm.wasm.js", location.href).href,
+  langPath: new URL("vendor/tesseract/", location.href).href,
+};
 const ROLE_ORDER = ["TOP_LEFT", "TOP_RIGHT", "BOTTOM_RIGHT", "BOTTOM_LEFT"];
 
 // ---- tunables ----------------------------------------------------------
@@ -42,11 +52,15 @@ let lastSent = 0;
 let lockStart = 0;
 let markers = [];            // latest markers, in intrinsic (full-res) pixels
 let markersAt = 0;
-const rectifyWaiters = new Map();
+let recognizer = null;
+let ocrBackend = "none";
+const analyzeWaiters = new Map();
 
 const procCanvas = document.createElement("canvas");
 const procCtx = procCanvas.getContext("2d", { willReadFrequently: true });
 const grabCanvas = document.createElement("canvas");
+const rectCanvas = document.createElement("canvas");
+const work = document.createElement("canvas"); // per-region OCR scratch
 const objectUrls = [];
 
 // ---- boot ---------------------------------------------------------
@@ -56,6 +70,12 @@ const objectUrls = [];
   worker.onerror = (e) => fatal(`worker failed: ${e.message || e}`);
   worker.onmessage = onWorkerMessage;
   worker.postMessage({ type: "init", opencvUrls: OPENCV_URLS });
+
+  // warm up OCR in parallel; falls back to a null recognizer if it can't load
+  getRecognizer("auto", TESSERACT_PATHS).then((rec) => {
+    recognizer = rec;
+    ocrBackend = rec.name;
+  }).catch(() => { ocrBackend = "none"; });
 })();
 
 function onWorkerMessage(e) {
@@ -84,9 +104,12 @@ function onWorkerMessage(e) {
       markersAt = performance.now();
       break;
     }
-    case "rectified": {
-      const w = rectifyWaiters.get(m.seq);
-      if (w) { rectifyWaiters.delete(m.seq); w(m); }
+    case "progress":
+      if (busy) setStatus(`Analyzing — ${m.stage}…`, "ok");
+      break;
+    case "analyzed": {
+      const w = analyzeWaiters.get(m.seq);
+      if (w) { analyzeWaiters.delete(m.seq); w(m); }
       break;
     }
   }
@@ -350,69 +373,152 @@ async function capture(trigger) {
   gctx.drawImage(video, 0, 0, vw, vh);
 
   const capturedMarkers = markers; // already intrinsic (full-res) pixels
+  const stamp = new Date();
 
-  // ask the worker to perspective-normalize (it computes the page quad itself)
+  setStatus("Analyzing…", "ok");
   const full = gctx.getImageData(0, 0, vw, vh);
-  const rectSeq = ++seq;
-  const rectMsg = await new Promise((resolve) => {
-    rectifyWaiters.set(rectSeq, resolve);
+  const seqId = ++seq;
+  const msg = await new Promise((resolve) => {
+    analyzeWaiters.set(seqId, resolve);
     worker.postMessage(
-      {
-        type: "rectify", seq: rectSeq,
-        width: vw, height: vh, buffer: full.data.buffer,
-        markers: capturedMarkers,
-      },
+      { type: "analyze", seq: seqId, width: vw, height: vh, buffer: full.data.buffer, markers: capturedMarkers },
       [full.data.buffer],
     );
     setTimeout(() => {
-      if (rectifyWaiters.has(rectSeq)) { rectifyWaiters.delete(rectSeq); resolve({ error: "timeout" }); }
-    }, 8000);
+      if (analyzeWaiters.has(seqId)) { analyzeWaiters.delete(seqId); resolve({ error: "analysis timed out" }); }
+    }, 20000);
   });
 
-  let rectUrl = null;
-  let normalized = null;
-  if (rectMsg && rectMsg.buffer) {
-    const rc = document.createElement("canvas");
-    rc.width = rectMsg.width;
-    rc.height = rectMsg.height;
-    rc.getContext("2d").putImageData(
-      new ImageData(new Uint8ClampedArray(rectMsg.buffer), rectMsg.width, rectMsg.height),
-      0, 0,
-    );
-    rectUrl = await canvasUrl(rc, "image/png");
-    normalized = { width: rectMsg.width, height: rectMsg.height, target_long_px: 1600 };
-  }
-
   const rawUrl = await canvasUrl(grabCanvas, "image/jpeg", JPEG_QUALITY);
-  const stamp = new Date();
-  const sidecar = {
-    app: "WJM MobileDeviceDemo",
-    captured_at: stamp.toISOString(),
-    trigger,
-    engine: "OpenCV.js (WebAssembly, Web Worker)",
-    dictionary: "DICT_4X4_50",
-    image: { width: vw, height: vh },
-    markers: capturedMarkers.map((m) => ({
-      id: m.id,
-      role: m.role,
-      corners: m.corners.map(([x, y]) => [round1(x), round1(y)]),
-    })),
-    page_frame_quad: rectMsg && rectMsg.quad
-      ? rectMsg.quad.map(([x, y]) => [round1(x), round1(y)])
-      : null,
-    normalized,
-  };
-  const jsonUrl = URL.createObjectURL(
-    new Blob([JSON.stringify(sidecar, null, 2)], { type: "application/json" }),
-  );
+  let capture;
+  let rectUrl = null;
 
+  if (msg && msg.geometry && msg.rectified) {
+    const r = msg.rectified;
+    rectCanvas.width = r.width;
+    rectCanvas.height = r.height;
+    rectCanvas.getContext("2d").putImageData(
+      new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0,
+    );
+    rectUrl = await canvasUrl(rectCanvas, "image/png");
+    capture = await runExtraction(msg.geometry, rectCanvas);
+  } else {
+    capture = {
+      app: "WJM MobileDeviceDemo",
+      error: (msg && msg.error) || "analysis failed",
+      source: { width: vw, height: vh },
+      detected_fiducials: capturedMarkers.map((m) => ({
+        id: m.id, role: m.role, corners: m.corners.map(([x, y]) => [round1(x), round1(y)]),
+      })),
+    };
+  }
+  capture.app = "WJM MobileDeviceDemo";
+  capture.captured_at = stamp.toISOString();
+  capture.trigger = trigger;
+  capture.engine = `OpenCV.js${ocrBackend === "tesseract" ? " + Tesseract.js" : ""} (WebAssembly, Web Worker)`;
+
+  const jsonUrl = URL.createObjectURL(
+    new Blob([JSON.stringify(capture, null, 2)], { type: "application/json" }),
+  );
   objectUrls.push(rawUrl, jsonUrl);
   if (rectUrl) objectUrls.push(rectUrl);
-  showResult({ rawUrl, rectUrl, jsonUrl, sidecar, stamp });
+  showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error: capture.error });
   busy = false;
 }
 
-function showResult({ rawUrl, rectUrl, jsonUrl, sidecar, stamp }) {
+// OCR the metadata cells + body lines off the rectified page, then parse — the
+// main-thread mirror of ingest_image's recognition tail (metadata.py / parse.py).
+async function runExtraction(geometry, rectCanvas) {
+  const g = geometry;
+  const capture = {
+    dictionary: g.dictionary,
+    source: g.source,
+    page_frame_quad: g.page_frame_quad,
+    orientation: g.orientation,
+    normalized: g.normalized,
+    detected_fiducials: g.detected_fiducials,
+    metadata_block: g.metadata_block,
+    page_metadata: null,
+    text_backend: recognizer ? recognizer.name : "none",
+    literal_assets: g.literal_assets,
+    detected_elements: [],
+    notes: [],
+  };
+
+  const P = window.WJMParse;
+  const canOcr = recognizer && recognizer.name !== "none";
+  const conf = [];
+
+  const ocrCrop = async (x, y, w, h) => {
+    if (!canOcr || w < 1 || h < 1) return { text: "", words: [], recognized: false };
+    const pad = 10;
+    work.width = Math.round(w) + pad * 2;
+    work.height = Math.round(h) + pad * 2;
+    const wc = work.getContext("2d");
+    wc.fillStyle = "#fff";
+    wc.fillRect(0, 0, work.width, work.height);
+    wc.drawImage(rectCanvas, Math.round(x), Math.round(y), Math.round(w), Math.round(h),
+      pad, pad, Math.round(w), Math.round(h));
+    return recognizer.recognize(work);
+  };
+
+  if (g.metadata_block && canOcr) {
+    setStatus("Reading the header…", "ok");
+    const padCells = (cells, n) => cells.concat(Array(n).fill(null)).slice(0, n);
+    const cellText = async (c) => {
+      if (!c) return "";
+      const r = await ocrCrop(c[0], c[1], c[2], c[3]);
+      if (r.recognized) { for (const w of r.words) conf.push(w.confidence); return r.text; }
+      return "";
+    };
+    const row1 = [];
+    for (const c of padCells(g.metadata_block.row1_cells, 3)) row1.push(await cellText(c));
+    const row2 = [];
+    for (const c of padCells(g.metadata_block.row2_cells, 4)) row2.push(await cellText(c));
+    capture.page_metadata = Object.assign({}, P.parseMetadataCells(row1, row2), {
+      _confidence: conf.length ? Math.round((conf.reduce((s, v) => s + v, 0) / conf.length) * 1000) / 1000 : 0,
+    });
+  }
+
+  if (canOcr) {
+    setStatus("Reading the body…", "ok");
+    const lines = [];
+    for (const [x, y, w, h] of g.line_boxes) {
+      const r = await ocrCrop(x, y, w, h);
+      const c = (r.words || []).map((wd) => wd.confidence);
+      lines.push({
+        text: r.recognized ? r.text : "",
+        bbox: [x, y, w, h],
+        confidence: c.length ? Math.round((c.reduce((s, v) => s + v, 0) / c.length) * 1000) / 1000 : 0,
+        recognized: r.recognized,
+      });
+    }
+    capture.detected_elements = P.parseLines(lines);
+  }
+
+  capture.notes = buildNotes(capture);
+  return capture;
+}
+
+function buildNotes(c) {
+  const notes = [`${(c.detected_fiducials || []).length} ArUco marker(s); orientation via marker ids`];
+  if (c.metadata_block) {
+    notes.push(`metadata block: ${c.metadata_block.row1_cells.length}+${c.metadata_block.row2_cells.length} cells (conf ${c.metadata_block.confidence})`);
+  }
+  if (c.literal_assets && c.literal_assets.length) {
+    notes.push(`${c.literal_assets.length} literal image region(s) detected and masked (spec §16)`);
+  }
+  const els = c.detected_elements || [];
+  if (els.length) {
+    const byKind = {};
+    for (const e of els) byKind[e.kind] = (byKind[e.kind] || 0) + 1;
+    notes.push("parsed elements: " + Object.entries(byKind).sort().map(([k, v]) => `${v} ${k}`).join(", "));
+  }
+  notes.push(`text backend: ${c.text_backend}`);
+  return notes;
+}
+
+function showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error }) {
   $("shot-raw").src = rawUrl;
   const figRect = $("fig-rect");
   const dlRect = $("dl-rect");
@@ -430,15 +536,62 @@ function showResult({ rawUrl, rectUrl, jsonUrl, sidecar, stamp }) {
   wireDownload("dl-json", jsonUrl, `wjm-${slug}.json`);
   if (rectUrl) wireDownload("dl-rect", rectUrl, `wjm-${slug}-rectified.png`);
 
-  const m = sidecar;
-  $("result-meta").textContent =
-    `trigger    ${m.trigger}\n` +
-    `markers    ${m.markers.map((x) => x.id).join(", ") || "—"}  (${m.dictionary})\n` +
-    `photo      ${m.image.width}×${m.image.height}\n` +
-    `rectified  ${m.normalized ? `${m.normalized.width}×${m.normalized.height}` : "—"}\n` +
-    `engine     ${m.engine}`;
-
+  $("result-meta").replaceChildren(...buildSummary(capture, error));
   $("result").hidden = false;
+}
+
+// structured breakdown of the extraction, mirroring the CLI capture record
+function buildSummary(c, error) {
+  const nodes = [];
+  const row = (label, value, cls) => {
+    const d = document.createElement("div");
+    d.className = "srow" + (cls ? " " + cls : "");
+    d.innerHTML = `<span class="slabel">${label}</span><span class="sval">${value}</span>`;
+    return d;
+  };
+  const esc = (s) => String(s == null ? "—" : s).replace(/[<>&]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]));
+
+  if (error) nodes.push(row("error", esc(error), "err"));
+
+  const ids = (c.detected_fiducials || []).map((f) => f.id).join(", ") || "—";
+  nodes.push(row("markers", `${ids}  (${esc(c.dictionary || "DICT_4X4_50")})`));
+  if (c.source) nodes.push(row("photo", `${c.source.width}×${c.source.height}`));
+  if (c.normalized) nodes.push(row("rectified", `${c.normalized.width}×${c.normalized.height}`));
+  nodes.push(row("OCR", esc(c.text_backend || ocrBackend)));
+
+  const md = c.page_metadata;
+  if (md) {
+    nodes.push(row("— page metadata —", "", "shead"));
+    for (const k of ["document_id", "page_id"]) if (md[k]) nodes.push(row(k, esc(md[k])));
+    if (md.topic_tags && md.topic_tags.length) nodes.push(row("topic_tags", esc(md.topic_tags.join(", "))));
+    const nbrs = ["left", "above", "below", "right"].filter((k) => md[k]);
+    if (nbrs.length) nodes.push(row("neighbours", nbrs.map((k) => `${k}=${esc(md[k])}`).join("  ")));
+  } else if (c.metadata_block) {
+    nodes.push(row("page metadata", "block found, cells unread"));
+  }
+
+  const els = c.detected_elements || [];
+  if (els.length) {
+    const byKind = {};
+    for (const e of els) byKind[e.kind] = (byKind[e.kind] || 0) + 1;
+    nodes.push(row("— elements —", Object.entries(byKind).sort().map(([k, v]) => `${v} ${k}`).join("  "), "shead"));
+    for (const e of els.slice(0, 24)) {
+      const tag = e.kind === "bullet" ? `${e.data.glyph} ${e.data.state}` : e.kind;
+      const body = e.kind === "bullet" ? e.data.item
+        : e.kind === "contact" ? (e.data.name || e.text)
+          : e.kind === "reference" ? [e.data.document, e.data.page, e.data.anchor].filter(Boolean).join(":")
+            : e.text;
+      nodes.push(row(esc(tag), esc(body || "").slice(0, 80)));
+    }
+    if (els.length > 24) nodes.push(row("", `… ${els.length - 24} more`));
+  } else if ((c.text_backend || ocrBackend) === "none") {
+    nodes.push(row("elements", "geometry only — no OCR engine"));
+  }
+
+  if (c.literal_assets && c.literal_assets.length) {
+    nodes.push(row("literal regions", `${c.literal_assets.length} (masked, spec §16)`));
+  }
+  return nodes;
 }
 
 const wireDownload = (id, url, name) => {

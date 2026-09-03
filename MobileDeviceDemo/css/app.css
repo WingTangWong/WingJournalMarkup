@@ -135,9 +135,16 @@ html, body {
 .meta {
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--muted); background: rgba(0,0,0,0.35);
-  border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
-  white-space: pre-wrap; word-break: break-word;
+  border-radius: 10px; padding: 8px 10px; margin-bottom: 14px;
+  max-height: 40vh; overflow-y: auto; word-break: break-word;
 }
+.srow { display: flex; gap: 8px; padding: 2px 0; }
+.srow .slabel { flex: 0 0 40%; color: #7f8b98; }
+.srow .sval { flex: 1; color: var(--fg); }
+.srow.shead { margin-top: 8px; }
+.srow.shead .slabel { color: var(--accent); flex-basis: auto; }
+.srow.shead .sval { color: var(--muted); text-align: right; }
+.srow.err .sval { color: var(--danger); }
 .result-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .result-actions .primary { grid-column: 1 / -1; }
 .result-actions .ctl { justify-content: center; text-align: center; }
