@@ -417,19 +417,33 @@ async function capture(trigger) {
   capture.trigger = trigger;
   capture.engine = `OpenCV.js${ocrBackend === "tesseract" ? " + Tesseract.js" : ""} (WebAssembly, Web Worker)`;
 
-  const jsonUrl = URL.createObjectURL(
-    new Blob([JSON.stringify(capture, null, 2)], { type: "application/json" }),
-  );
+  // crop data URLs are for the on-screen report only — keep the JSON lean
+  const jsonUrl = URL.createObjectURL(new Blob(
+    [JSON.stringify(capture, (k, v) => (k === "cropUrl" ? undefined : v), 2)],
+    { type: "application/json" },
+  ));
   objectUrls.push(rawUrl, jsonUrl);
   if (rectUrl) objectUrls.push(rectUrl);
   showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error: capture.error });
+  setStatus("Captured", "ok");
   busy = false;
 }
 
+const METADATA_FIELDS = ["document_id", "page_id", "topic_tags", "left", "above", "below", "right"];
+const mean = (xs) => (xs.length ? xs.reduce((s, v) => s + v, 0) / xs.length : 0);
+const round3 = (v) => Math.round(v * 1000) / 1000;
+
+// crops are kept as data URLs for the on-screen report only (not the JSON)
+const cropUrls = [];
+
 // OCR the metadata cells + body lines off the rectified page, then parse — the
 // main-thread mirror of ingest_image's recognition tail (metadata.py / parse.py).
-async function runExtraction(geometry, rectCanvas) {
+// Also records every crop it feeds to OCR, for the debug report.
+async function runExtraction(geometry, rect) {
   const g = geometry;
+  const P = window.WJMParse;
+  const canOcr = recognizer && recognizer.name !== "none";
+
   const capture = {
     dictionary: g.dictionary,
     source: g.source,
@@ -442,62 +456,104 @@ async function runExtraction(geometry, rectCanvas) {
     text_backend: recognizer ? recognizer.name : "none",
     literal_assets: g.literal_assets,
     detected_elements: [],
+    line_boxes: g.line_boxes,
+    _debug: { metadata_cells: [], body: [] },
     notes: [],
   };
 
-  const P = window.WJMParse;
-  const canOcr = recognizer && recognizer.name !== "none";
-  const conf = [];
-
-  const ocrCrop = async (x, y, w, h) => {
-    if (!canOcr || w < 1 || h < 1) return { text: "", words: [], recognized: false };
+  // crop a region of the rectified page, pad it white (what OCR sees), keep the
+  // image, and — unless doOcr is false — recognize it.
+  const region = async (bbox, doOcr = true) => {
+    if (!bbox) return { text: "", words: [], recognized: false, cropUrl: null };
+    const [x, y, w, h] = bbox.map((v) => Math.round(v));
+    if (w < 1 || h < 1) return { text: "", words: [], recognized: false, cropUrl: null };
     const pad = 10;
-    work.width = Math.round(w) + pad * 2;
-    work.height = Math.round(h) + pad * 2;
+    work.width = w + pad * 2;
+    work.height = h + pad * 2;
     const wc = work.getContext("2d");
     wc.fillStyle = "#fff";
     wc.fillRect(0, 0, work.width, work.height);
-    wc.drawImage(rectCanvas, Math.round(x), Math.round(y), Math.round(w), Math.round(h),
-      pad, pad, Math.round(w), Math.round(h));
-    return recognizer.recognize(work);
+    wc.drawImage(rect, x, y, w, h, pad, pad, w, h);
+    const cropUrl = capCropUrl(work);
+    cropUrls.push(cropUrl);
+    if (!canOcr || !doOcr) return { text: "", words: [], recognized: false, cropUrl };
+    const r = await recognizer.recognize(work);
+    return Object.assign({ cropUrl }, r);
   };
 
-  if (g.metadata_block && canOcr) {
-    setStatus("Reading the header…", "ok");
-    const padCells = (cells, n) => cells.concat(Array(n).fill(null)).slice(0, n);
-    const cellText = async (c) => {
-      if (!c) return "";
-      const r = await ocrCrop(c[0], c[1], c[2], c[3]);
-      if (r.recognized) { for (const w of r.words) conf.push(w.confidence); return r.text; }
-      return "";
-    };
-    const row1 = [];
-    for (const c of padCells(g.metadata_block.row1_cells, 3)) row1.push(await cellText(c));
-    const row2 = [];
-    for (const c of padCells(g.metadata_block.row2_cells, 4)) row2.push(await cellText(c));
-    capture.page_metadata = Object.assign({}, P.parseMetadataCells(row1, row2), {
-      _confidence: conf.length ? Math.round((conf.reduce((s, v) => s + v, 0) / conf.length) * 1000) / 1000 : 0,
+  // ---- metadata cells (always report all 7 fields, in canonical order) ----
+  setStatus("Reading the header…", "ok");
+  const padCells = (cells, n) => (cells || []).concat(Array(n).fill(null)).slice(0, n);
+  const cells = g.metadata_block
+    ? [...padCells(g.metadata_block.row1_cells, 3), ...padCells(g.metadata_block.row2_cells, 4)]
+    : Array(7).fill(null);
+  const rowText = [];
+  const cellConf = [];
+  for (let i = 0; i < 7; i++) {
+    const r = await region(cells[i]);
+    let text = "";
+    let confidence = 0;
+    if (r.recognized) {
+      const cs = r.words.map((w) => w.confidence);
+      confidence = round3(mean(cs));
+      for (const c of cs) cellConf.push(c);
+      text = r.text;
+    }
+    rowText.push(text);
+    capture._debug.metadata_cells.push({
+      field: METADATA_FIELDS[i], bbox: cells[i], text, confidence,
+      recognized: !!r.recognized, cropUrl: r.cropUrl,
     });
   }
+  capture.page_metadata = Object.assign(
+    {}, P.parseMetadataCells(rowText.slice(0, 3), rowText.slice(3)),
+    { _confidence: round3(mean(cellConf)) },
+  );
 
-  if (canOcr) {
-    setStatus("Reading the body…", "ok");
-    const lines = [];
-    for (const [x, y, w, h] of g.line_boxes) {
-      const r = await ocrCrop(x, y, w, h);
-      const c = (r.words || []).map((wd) => wd.confidence);
-      lines.push({
-        text: r.recognized ? r.text : "",
-        bbox: [x, y, w, h],
-        confidence: c.length ? Math.round((c.reduce((s, v) => s + v, 0) / c.length) * 1000) / 1000 : 0,
-        recognized: r.recognized,
-      });
-    }
-    capture.detected_elements = P.parseLines(lines);
+  // ---- body lines ----
+  setStatus("Reading the body…", "ok");
+  const lines = [];
+  for (const box of g.line_boxes) {
+    const r = await region(box);
+    const cs = (r.words || []).map((w) => w.confidence);
+    lines.push({
+      text: r.recognized ? r.text : "",
+      bbox: box, confidence: round3(mean(cs)), recognized: !!r.recognized,
+    });
+    capture._debug.body.push({
+      kind: "line", bbox: box, text: r.recognized ? r.text : "",
+      recognized: !!r.recognized, elements: [], cropUrl: r.cropUrl,
+    });
+  }
+  capture.detected_elements = P.parseLines(lines);
+  for (const d of capture._debug.body) {
+    d.elements = capture.detected_elements
+      .filter((e) => e.bbox && e.bbox[0] === d.bbox[0] && e.bbox[1] === d.bbox[1])
+      .map((e) => (e.kind === "bullet" ? `bullet:${e.data.state}` : e.kind));
+  }
+
+  // ---- literal / as-is image regions (spec §16) ----
+  for (const lit of g.literal_assets || []) {
+    const r = await region(lit.bbox, false);
+    capture._debug.body.push({
+      kind: "literal", bbox: lit.bbox, confidence: lit.confidence, cropUrl: r.cropUrl,
+    });
   }
 
   capture.notes = buildNotes(capture);
   return capture;
+}
+
+// keep the stored crop image reasonably small; OCR still ran on full resolution
+function capCropUrl(cnv) {
+  const maxW = 760;
+  if (cnv.width <= maxW) return cnv.toDataURL("image/png");
+  const s = maxW / cnv.width;
+  const t = document.createElement("canvas");
+  t.width = maxW;
+  t.height = Math.max(1, Math.round(cnv.height * s));
+  t.getContext("2d").drawImage(cnv, 0, 0, t.width, t.height);
+  return t.toDataURL("image/png");
 }
 
 function buildNotes(c) {
@@ -518,12 +574,34 @@ function buildNotes(c) {
   return notes;
 }
 
+const esc = (s) => String(s == null ? "" : s).replace(/[<>&]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]));
+
+// the rectified page with green boxes over every OpenCV-detected region
+function annotateRectified(capture) {
+  const cnv = document.createElement("canvas");
+  cnv.width = rectCanvas.width;
+  cnv.height = rectCanvas.height;
+  const ctx = cnv.getContext("2d");
+  ctx.drawImage(rectCanvas, 0, 0);
+  ctx.lineWidth = Math.max(2, Math.round(cnv.width / 500));
+  const box = (b, color) => { if (!b) return; ctx.strokeStyle = color; ctx.strokeRect(b[0], b[1], b[2], b[3]); };
+
+  const mb = capture.metadata_block;
+  if (mb) {
+    box(mb.bbox, "rgba(46,204,113,0.95)");
+    for (const c of [...mb.row1_cells, ...mb.row2_cells]) box(c, "rgba(46,204,113,0.75)");
+  }
+  for (const lb of capture.line_boxes || []) box(lb, "rgba(46,204,113,0.9)");
+  for (const lit of capture.literal_assets || []) box(lit.bbox, "rgba(90,160,255,0.95)");
+  return cnv.toDataURL("image/png");
+}
+
 function showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error }) {
   $("shot-raw").src = rawUrl;
   const figRect = $("fig-rect");
   const dlRect = $("dl-rect");
   if (rectUrl) {
-    $("shot-rect").src = rectUrl;
+    $("shot-rect").src = annotateRectified(capture);
     figRect.classList.remove("empty");
     dlRect.style.display = "";
   } else {
@@ -536,62 +614,111 @@ function showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error }) {
   wireDownload("dl-json", jsonUrl, `wjm-${slug}.json`);
   if (rectUrl) wireDownload("dl-rect", rectUrl, `wjm-${slug}-rectified.png`);
 
-  $("result-meta").replaceChildren(...buildSummary(capture, error));
-  $("result").hidden = false;
+  $("sec-meta").replaceChildren(...sectionExtraction(capture, error));
+  $("sec-debug-meta").replaceChildren(...sectionMetadataCrops(capture));
+  $("sec-debug-body").replaceChildren(...sectionBody(capture));
+
+  const rpt = $("result");
+  rpt.hidden = false;
+  rpt.scrollTop = 0;
 }
 
-// structured breakdown of the extraction, mirroring the CLI capture record
-function buildSummary(c, error) {
-  const nodes = [];
-  const row = (label, value, cls) => {
-    const d = document.createElement("div");
-    d.className = "srow" + (cls ? " " + cls : "");
-    d.innerHTML = `<span class="slabel">${label}</span><span class="sval">${value}</span>`;
-    return d;
-  };
-  const esc = (s) => String(s == null ? "—" : s).replace(/[<>&]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]));
+const el = (tag, cls, html) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html != null) n.innerHTML = html;
+  return n;
+};
+const srow = (label, value, cls) =>
+  el("div", "srow" + (cls ? " " + cls : ""), `<span class="slabel">${esc(label)}</span><span class="sval">${value}</span>`);
 
-  if (error) nodes.push(row("error", esc(error), "err"));
+// --- section: parsed extraction values -------------------------------
+function sectionExtraction(c, error) {
+  const out = [el("h3", null, "Extraction")];
+  if (error) out.push(srow("error", esc(error), "err"));
+  out.push(srow("markers", `${(c.detected_fiducials || []).map((f) => f.id).join(", ") || "—"}  (${esc(c.dictionary || "DICT_4X4_50")})`));
+  if (c.source) out.push(srow("photo", `${c.source.width}×${c.source.height}`));
+  if (c.normalized) out.push(srow("rectified", `${c.normalized.width}×${c.normalized.height}`));
+  out.push(srow("OCR engine", esc(c.text_backend || ocrBackend)));
 
-  const ids = (c.detected_fiducials || []).map((f) => f.id).join(", ") || "—";
-  nodes.push(row("markers", `${ids}  (${esc(c.dictionary || "DICT_4X4_50")})`));
-  if (c.source) nodes.push(row("photo", `${c.source.width}×${c.source.height}`));
-  if (c.normalized) nodes.push(row("rectified", `${c.normalized.width}×${c.normalized.height}`));
-  nodes.push(row("OCR", esc(c.text_backend || ocrBackend)));
-
-  const md = c.page_metadata;
-  if (md) {
-    nodes.push(row("— page metadata —", "", "shead"));
-    for (const k of ["document_id", "page_id"]) if (md[k]) nodes.push(row(k, esc(md[k])));
-    if (md.topic_tags && md.topic_tags.length) nodes.push(row("topic_tags", esc(md.topic_tags.join(", "))));
-    const nbrs = ["left", "above", "below", "right"].filter((k) => md[k]);
-    if (nbrs.length) nodes.push(row("neighbours", nbrs.map((k) => `${k}=${esc(md[k])}`).join("  ")));
-  } else if (c.metadata_block) {
-    nodes.push(row("page metadata", "block found, cells unread"));
+  const md = c.page_metadata || {};
+  out.push(el("div", "srow", `<span class="slabel">page metadata</span><span class="sval">conf ${md._confidence ?? 0}</span>`));
+  for (const f of METADATA_FIELDS) {
+    const v = f === "topic_tags"
+      ? (md.topic_tags && md.topic_tags.length ? md.topic_tags.join(", ") : "—")
+      : (md[f] || "—");
+    out.push(srow("  " + f, esc(v), md[f] || (f === "topic_tags" && md.topic_tags && md.topic_tags.length) ? "" : "muted"));
   }
 
   const els = c.detected_elements || [];
   if (els.length) {
     const byKind = {};
     for (const e of els) byKind[e.kind] = (byKind[e.kind] || 0) + 1;
-    nodes.push(row("— elements —", Object.entries(byKind).sort().map(([k, v]) => `${v} ${k}`).join("  "), "shead"));
-    for (const e of els.slice(0, 24)) {
-      const tag = e.kind === "bullet" ? `${e.data.glyph} ${e.data.state}` : e.kind;
-      const body = e.kind === "bullet" ? e.data.item
-        : e.kind === "contact" ? (e.data.name || e.text)
-          : e.kind === "reference" ? [e.data.document, e.data.page, e.data.anchor].filter(Boolean).join(":")
-            : e.text;
-      nodes.push(row(esc(tag), esc(body || "").slice(0, 80)));
-    }
-    if (els.length > 24) nodes.push(row("", `… ${els.length - 24} more`));
-  } else if ((c.text_backend || ocrBackend) === "none") {
-    nodes.push(row("elements", "geometry only — no OCR engine"));
+    out.push(srow("elements", Object.entries(byKind).sort().map(([k, v]) => `${v} ${k}`).join("  ")));
+  } else {
+    out.push(srow("elements", "none parsed", "muted"));
   }
+  return out;
+}
 
-  if (c.literal_assets && c.literal_assets.length) {
-    nodes.push(row("literal regions", `${c.literal_assets.length} (masked, spec §16)`));
+// --- section: the 7 metadata cell crops fed to OCR -------------------
+function sectionMetadataCrops(c) {
+  const out = [el("h3", null, "Metadata cells — crops fed to OCR")];
+  const cells = (c._debug && c._debug.metadata_cells) || [];
+  if (!cells.length || !cells.some((x) => x.bbox)) {
+    out.push(srow("", "no metadata block detected on this page", "muted"));
+    return out;
   }
-  return nodes;
+  for (const cell of cells) out.push(cropCard({
+    label: cell.field,
+    badge: !cell.bbox ? "no cell" : cell.recognized ? `${Math.round(cell.confidence * 100)}%` : "nothing read",
+    badgeCls: !cell.bbox || !cell.recognized ? "none" : "",
+    cropUrl: cell.cropUrl,
+    read: cell.bbox ? (cell.recognized ? cell.text : "(nothing read)") : "(cell not found)",
+    readEmpty: !cell.recognized,
+  }));
+  return out;
+}
+
+// --- section: page body — nodes / text lines / image blocks ---------
+function sectionBody(c) {
+  const out = [el("h3", null, "Page body — text lines & image regions")];
+  const items = (c._debug && c._debug.body) || [];
+  if (!items.length) {
+    out.push(srow("", "no body regions segmented", "muted"));
+    return out;
+  }
+  for (const it of items) {
+    if (it.kind === "literal") {
+      out.push(cropCard({
+        label: "image block", badge: "as-is image", badgeCls: "img",
+        cropUrl: it.cropUrl, read: `literal region (spec §16) — conf ${it.confidence}`, readEmpty: false,
+      }));
+      continue;
+    }
+    const kinds = it.elements && it.elements.length ? it.elements.join(", ") : (it.recognized ? "text" : "unread");
+    out.push(cropCard({
+      label: "line", badge: kinds, badgeCls: it.recognized ? "" : "none",
+      cropUrl: it.cropUrl,
+      read: it.recognized ? it.text : "(nothing read)",
+      readEmpty: !it.recognized,
+    }));
+  }
+  return out;
+}
+
+function cropCard({ label, badge, badgeCls, cropUrl, read, readEmpty }) {
+  const card = el("div", "crop");
+  card.appendChild(el("header", null,
+    `<span>${esc(label)}</span><span class="badge ${badgeCls || ""}">${esc(badge)}</span>`));
+  if (cropUrl) {
+    const img = el("img");
+    img.src = cropUrl;
+    img.alt = label + " crop";
+    card.appendChild(img);
+  }
+  card.appendChild(el("div", "read" + (readEmpty ? " empty" : ""), esc(read)));
+  return card;
 }
 
 const wireDownload = (id, url, name) => {
@@ -601,11 +728,15 @@ const wireDownload = (id, url, name) => {
 };
 
 $("btn-retake").addEventListener("click", () => {
-  $("result").hidden = true;
+  $("result").hidden = true;                 // reveals the full-screen camera view
   while (objectUrls.length) URL.revokeObjectURL(objectUrls.pop());
+  cropUrls.length = 0;
+  $("sec-debug-meta").replaceChildren();
+  $("sec-debug-body").replaceChildren();
   running = true;
   lockStart = 0;
   markers = [];
+  setStatus("Point at a WJM sheet");
   requestAnimationFrame(loop);
 });
 

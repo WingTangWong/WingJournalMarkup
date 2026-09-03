@@ -59,20 +59,29 @@
   </div>
 
   <!-- result -->
-  <div id="result" class="sheet" hidden>
-    <div class="sheet-inner result-inner">
-      <h2>Captured</h2>
-      <div class="shots">
+  <div id="result" class="report" hidden>
+    <header class="report-bar">
+      <strong>Captured</strong>
+      <button id="btn-retake" class="ctl" type="button">Retake</button>
+    </header>
+    <div class="report-scroll">
+      <section class="shots">
         <figure><figcaption>Photo</figcaption><img id="shot-raw" alt="captured photo"></figure>
-        <figure id="fig-rect"><figcaption>Rectified page</figcaption><img id="shot-rect" alt="rectified page"></figure>
-      </div>
-      <div id="result-meta" class="meta"></div>
-      <div class="result-actions">
+        <figure id="fig-rect">
+          <figcaption>Rectified page — <span class="ok">green</span> = detected regions</figcaption>
+          <img id="shot-rect" alt="rectified page with detected regions">
+        </figure>
+      </section>
+
+      <section id="sec-meta"></section>
+      <section id="sec-debug-meta"></section>
+      <section id="sec-debug-body"></section>
+
+      <section class="report-actions">
         <a id="dl-raw"  class="primary" download>Save photo</a>
         <a id="dl-rect" class="ctl"     download>Save rectified</a>
         <a id="dl-json" class="ctl"     download>Save data</a>
-        <button id="btn-retake" class="ctl" type="button">Retake</button>
-      </div>
+      </section>
     </div>
   </div>
 

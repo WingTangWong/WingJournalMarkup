@@ -72,10 +72,24 @@ also gives you HTTPS without certs.
 5. Main thread OCRs each cell and line, runs `wjm-parse`, and assembles the
    capture record.
 
-### Output
+### The captured report
+
+Capture opens a full-screen scrollable report (tap **Retake** to go back to the
+camera). It's built for diagnosing OCR — screenshot or print it and send it
+back:
+
+- the **photo** and the **rectified page with every OpenCV-detected region
+  outlined** (green = metadata block / cells / text lines, blue = literal image
+  region);
+- the parsed **extraction** — markers, sizes, and all seven metadata fields;
+- **Metadata cells — crops fed to OCR**: for each of `document_id`, `page_id`,
+  `topic_tags`, `left`, `above`, `below`, `right`, the exact padded crop handed
+  to Tesseract and what it read (or *nothing read*, in red);
+- **Page body**: each segmented text line as its crop + OCR text + the element
+  it parsed to; literal regions shown as *as-is image*.
 
 Three downloads: the full-res **photo** (JPEG), the **rectified page** (PNG),
-and the **capture data** (JSON):
+and the **capture data** (JSON — crops omitted to keep it small):
 
 ```jsonc
 {
