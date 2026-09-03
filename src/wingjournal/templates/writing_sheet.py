@@ -19,10 +19,21 @@ _RULE = (208, 208, 208)
 _FOOT = (140, 140, 140)
 
 
+def _draw_registration_mark(draw: ImageDraw.ImageDraw, cx: int, cy: int, size: int) -> None:
+    """A 3-ring concentric square (dark, bright, dark) on a white moat, so the
+    grid rules never touch it and it reads as a clean nested contour (spec §11)."""
+
+    for frac, fill in ((1.45, (255, 255, 255)), (1.0, _INK), (0.5, (255, 255, 255)), (0.22, _INK)):
+        r = max(1, round(size * frac / 2))
+        draw.rectangle([cx - r, cy - r, cx + r, cy + r], fill=fill)
+
+
 def _draw_metadata_block(draw: ImageDraw.ImageDraw, layout: SheetLayout) -> None:
     x, y, w, h = layout.metadata_rect
     row_h = layout.metadata_row1_h
-    lw = max(2, layout.dpi // 150)
+    # heavier grid than a hairline — thin rules were the first thing lost in a
+    # dim or slightly soft photo (the registration marks below carry the rest)
+    lw = max(3, layout.dpi // 90)
     cap_font = load_font(max(12, layout.dpi // 13))
 
     draw.rectangle([x, y, x + w, y + h], outline=_INK, width=lw)
@@ -37,9 +48,16 @@ def _draw_metadata_block(draw: ImageDraw.ImageDraw, layout: SheetLayout) -> None
             cx = x + round(w * c / n)
             draw.line([cx, y0, cx, y0 + row_h], fill=_INK, width=lw)
         pad = layout.dpi // 40
+        # keep captions clear of the corner registration marks
+        clear = int(layout.registration_px * 0.8) if layout.registration_px else pad
         for c, label in enumerate(captions):
             cx = x + round(w * c / n)
-            draw.text((cx + pad, y0 + pad), label, font=cap_font, fill=_CAPTION)
+            tx = cx + (clear if c == 0 else pad)
+            draw.text((tx, y0 + pad), label, font=cap_font, fill=_CAPTION)
+
+    if layout.registration_px:
+        for cx, cy in layout.registration_xy:
+            _draw_registration_mark(draw, cx, cy, layout.registration_px)
 
 
 def _draw_rules(draw: ImageDraw.ImageDraw, layout: SheetLayout, step_mm: float = 9.0) -> None:

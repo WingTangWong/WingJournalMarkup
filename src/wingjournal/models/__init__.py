@@ -110,6 +110,7 @@ class Capture:
     inferred_fiducials: list[FiducialCandidate] = field(default_factory=list)
     metadata_block: dict | None = None  # detected block geometry
     page_metadata: dict | None = None  # cell text parsed to PageMetadata (when OCR ran)
+    sharpness: dict | None = None  # SharpnessReport: score, probes, blurry (spec §9.x)
     text_backend: str | None = None
     literal_assets: list[dict] = field(default_factory=list)  # escaped image regions (§16)
     detected_elements: list[dict] = field(default_factory=list)

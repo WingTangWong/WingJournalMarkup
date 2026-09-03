@@ -1,10 +1,19 @@
 """Segmented metadata-block detection (spec §11), geometry only.
 
-On a normalized upright page, find the ruled box at the top and its cell grid:
+On a normalized upright page, find the title box at the top and its cell grid:
 row 1 has three cells (document id | page id | topic tags), row 2 has four
-(left | above | below | right). Text inside the cells is read later (M4). This
-also gives orientation resolution a strong "this edge is the top" signal
-(tier E).
+(left | above | below | right).
+
+Two ways in, tried in order:
+
+1. **registration marks** — the four concentric-square marks at the block
+   corners (`vision/registration.py`). Solid ink, so they survive dim or soft
+   photos that erase the thin rules. This is the primary path.
+2. **ruled lines** — the morphology / projection approach, for sheets printed
+   before the marks or hand-drawn blocks.
+
+Text inside the cells is read later (M4). This also gives orientation resolution
+a strong "this edge is the top" signal (tier E).
 """
 
 from __future__ import annotations
@@ -14,6 +23,8 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from wingjournal.vision.registration import detect_registration_marks, marks_to_quad
+
 
 @dataclass
 class MetadataBlock:
@@ -22,6 +33,8 @@ class MetadataBlock:
     row1_cells: list[list[float]] = field(default_factory=list)  # each [x, y, w, h]
     row2_cells: list[list[float]] = field(default_factory=list)
     confidence: float = 0.0
+    detection: str = "ruled_lines"  # "registration_marks" | "ruled_lines"
+    registration_marks: list[list[float]] = field(default_factory=list)  # [x, y, size, acutance]
 
 
 def _line_mask(binary: np.ndarray, horizontal: bool, scale: int = 20) -> np.ndarray:
@@ -64,15 +77,70 @@ def _row_cells(
     return [c for c in cells if c[2] >= min_cell]
 
 
-def detect_metadata_block(
-    normalized_image: np.ndarray, search_frac: float = 0.42
+def _cells_equal(bx: float, by: float, bw: float, bh: float, divider_y: float) -> tuple[list, list]:
+    """3 equal cells in row 1, 4 in row 2 — matches the printed sheet."""
+
+    def split(n: int, y0: float, y1: float) -> list[list[float]]:
+        return [
+            [bx + bw * i / n, y0, bw / n, y1 - y0] for i in range(n)
+        ]
+
+    return split(3, by, divider_y), split(4, divider_y, by + bh)
+
+
+def _from_registration_marks(
+    gray: np.ndarray, search_frac: float, exclude: list | None
 ) -> MetadataBlock | None:
+    h, w = gray.shape[:2]
+    band = (0, 0, w, max(1, int(h * search_frac)))
+    marks = detect_registration_marks(gray, roi=band, exclude=exclude, expected=4)
+    quad = marks_to_quad(marks)
+    if quad is None:
+        return None
+
+    xs = quad[:, 0]
+    ys = quad[:, 1]
+    bx, by = float(xs.min()), float(ys.min())
+    bw, bh = float(xs.max() - bx), float(ys.max() - by)
+    if bw < 0.35 * w or bh < 6 or bw / max(bh, 1) < 2.0:
+        return None
+
+    divider_y = by + bh / 2.0
+    r1, r2 = _cells_equal(bx, by, bw, bh, divider_y)
+    acut = float(np.mean([m.acutance for m in marks]))
+    return MetadataBlock(
+        bbox=[bx, by, bw, bh],
+        row_divider_y=divider_y,
+        row1_cells=r1,
+        row2_cells=r2,
+        confidence=round(0.75 + 0.25 * acut, 3),
+        detection="registration_marks",
+        registration_marks=[
+            [round(m.center[0], 1), round(m.center[1], 1), round(m.size, 1), m.acutance]
+            for m in marks
+        ],
+    )
+
+
+def detect_metadata_block(
+    normalized_image: np.ndarray,
+    search_frac: float = 0.42,
+    marker_boxes: list | None = None,
+) -> MetadataBlock | None:
+    """``marker_boxes`` = (x, y, w, h) of the corner ArUco markers, so the
+    registration-mark search skips them."""
+
     gray = (
         normalized_image
         if normalized_image.ndim == 2
         else cv2.cvtColor(normalized_image, cv2.COLOR_BGR2GRAY)
     )
     h, w = gray.shape[:2]
+
+    via_marks = _from_registration_marks(gray, search_frac, marker_boxes)
+    if via_marks is not None:
+        return via_marks
+
     top = gray[: int(h * search_frac), :]
     binary = cv2.adaptiveThreshold(
         top, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 35, 11

@@ -19,10 +19,11 @@ help a person produce scannable pages.
       markers (`DICT_4X4_50`, IDs 0/1/2/3 = TL/TR/BR/BL) at a physically
       controlled size, their outer edge on the ¼-inch print margin so they
       hug the paper corners, plus an empty two-row metadata block with ¼-inch
-      rows sitting in the span between the top two markers, vertically centred
-      within the marker height (spec §11); `--paper letter|a4|legal`,
-      `--pages`, `--marker-mm`, `--margin-mm`, `--ruled`; writes PDF or PNG by
-      output extension. Ready-made Letter sheets in `samples/`
+      rows in the span between the top two markers, its four corners carrying
+      concentric-square **registration marks** so the field grid is found from
+      solid ink rather than the hairline rules (spec §11.1); `--paper
+      letter|a4|legal`, `--pages`, `--marker-mm`, `--margin-mm`, `--ruled`;
+      writes PDF or PNG by output extension. Ready-made Letter sheets in `samples/`
 - ✅ `wingjournal make-legend` — one-page markup cheat-sheet PDF distilled from
       spec §10–22 (tags, bullet states, boxes, literal region, arrows, temporal,
       contacts, anchors/references, fiducials)
@@ -167,6 +168,14 @@ full-frame ~0.5 floor)*; documented numbers for the real-photo subset
 - ✅ Segmented metadata-block detection (`recognition/metadata_block.py`, spec
       §11): outer box, row divider, per-row cell grid (3 / 4) — geometry only;
       also drives orientation **Tier E** (2/1-marker orientation 0.6 → 0.8)
+- ✅ Registration-mark path for the metadata block (`vision/registration.py`,
+      spec §11.1): four concentric-square marks → block quad from solid ink,
+      ruled-line morphology as the fallback. Holds up where the hairline rules
+      are lost to poor lighting or a soft photo
+- ✅ Capture sharpness assessment (`vision/sharpness.py`, spec §9.1): Laplacian
+      variance + per-fiducial edge acutance → `Capture.sharpness` (score,
+      per-probe table, `blurry`). `ingest` records + warns; the live demo gates
+      auto-capture on it
 - ✅ Tag grammar parser (`recognition/tags.py`, spec §10, §19): `#term` /
       `#[term with spaces]`, metadata cells → `PageMetadata`, `document:page:anchor`
       references. Pure + fully tested; ready for OCR output in M4

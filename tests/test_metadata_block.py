@@ -14,8 +14,33 @@ def test_detect_block_on_writing_sheet():
     assert len(mb.row1_cells) == 3
     assert len(mb.row2_cells) == 4
     assert mb.confidence >= 0.9
+    # located from the registration marks, not the thin rules
+    assert mb.detection == "registration_marks"
+    assert len(mb.registration_marks) == 4
     # block sits near the top of the page
     assert mb.bbox[1] < 0.35 * compute_layout(dpi=200).height_px
+
+
+def test_falls_back_to_ruled_lines_without_marks():
+    import numpy as np
+
+    # a plain ruled 2-row grid, no registration marks
+    img = np.full((900, 1400), 255, np.uint8)
+    x0, y0, x1, y1 = 120, 60, 1280, 150
+    my = (y0 + y1) // 2
+    span = x1 - x0
+    cv2.rectangle(img, (x0, y0), (x1, y1), 0, 3)
+    cv2.line(img, (x0, my), (x1, my), 0, 3)
+    for f in (1 / 3, 2 / 3):
+        cx = int(x0 + span * f)
+        cv2.line(img, (cx, y0), (cx, my), 0, 3)
+    for f in (1 / 4, 2 / 4, 3 / 4):
+        cx = int(x0 + span * f)
+        cv2.line(img, (cx, my), (cx, y1), 0, 3)
+    mb = detect_metadata_block(img)
+    assert mb is not None
+    assert mb.detection == "ruled_lines"
+    assert (len(mb.row1_cells), len(mb.row2_cells)) == (3, 4)
 
 
 def test_detect_block_survives_the_pipeline():
@@ -23,8 +48,13 @@ def test_detect_block_survives_the_pipeline():
 
     scene, _ = warp_page(render_writing_sheet(compute_layout(dpi=200)), seed=3)
     result = ingest_image("s", scene)
-    assert result.capture.metadata_block is not None
-    assert len(result.capture.metadata_block["row1_cells"]) == 3
+    mb = result.capture.metadata_block
+    assert mb is not None
+    assert mb["detection"] == "registration_marks"
+    assert len(mb["row1_cells"]) == 3
+    # sharpness assessed and recorded (spec §9.x)
+    assert result.capture.sharpness is not None
+    assert result.capture.sharpness["blurry"] is False
 
 
 def test_no_block_on_blank_image():

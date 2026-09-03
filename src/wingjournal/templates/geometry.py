@@ -32,6 +32,11 @@ PRINT_MARGIN_MM = 25.4 / 4  # 6.35
 # Metadata-block row height: 1/4" per row, two rows (spec section 11).
 METADATA_ROW_MM = 25.4 / 4  # 6.35
 
+# Concentric-square registration mark at each metadata-block corner (spec §11).
+# Big enough to keep its rings resolvable after a phone photo + rectify, small
+# enough to straddle a corner without crossing an ArUco quiet zone.
+REGISTRATION_MARK_MM = 4.2
+
 
 def mm_to_px(mm: float, dpi: int) -> int:
     return round(mm / 25.4 * dpi)
@@ -52,6 +57,9 @@ class SheetLayout:
     metadata_row1_h: int
     body_top_px: int
     margin_px: int
+    # concentric-square registration marks: centre (x, y) at each block corner
+    registration_xy: tuple[tuple[int, int], ...] = ()
+    registration_px: int = 0
     row_captions: tuple[tuple[str, ...], tuple[str, ...]] = field(
         default=(METADATA_ROW1, METADATA_ROW2)
     )
@@ -69,6 +77,7 @@ def compute_layout(
     quiet_mm: float = 4.0,
     metadata_gap_mm: float = 8.0,
     metadata_row_mm: float = METADATA_ROW_MM,
+    registration_mark_mm: float = REGISTRATION_MARK_MM,
 ) -> SheetLayout:
     try:
         w_mm, h_mm = PAPERS_MM[paper]
@@ -103,6 +112,15 @@ def compute_layout(
     meta_w = W - 2 * meta_x
     meta_y = margin + (marker - meta_h) // 2
 
+    # registration marks straddle the four block corners (centre on the corner)
+    reg = mm_to_px(registration_mark_mm, dpi)
+    registration_xy = (
+        (meta_x, meta_y),
+        (meta_x + meta_w, meta_y),
+        (meta_x + meta_w, meta_y + meta_h),
+        (meta_x, meta_y + meta_h),
+    )
+
     return SheetLayout(
         paper=paper,
         dpi=dpi,
@@ -116,4 +134,6 @@ def compute_layout(
         # body starts below the whole top-marker band
         body_top_px=margin + marker + mm_to_px(metadata_gap_mm, dpi),
         margin_px=margin,
+        registration_xy=registration_xy,
+        registration_px=reg,
     )

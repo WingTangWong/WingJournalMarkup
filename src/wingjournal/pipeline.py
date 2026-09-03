@@ -38,6 +38,7 @@ from wingjournal.vision.literal_box import detect_literal_assets, mask_literals
 from wingjournal.vision.orientation import resolve_orientation
 from wingjournal.vision.preprocess import preprocess
 from wingjournal.vision.rectify import rectify
+from wingjournal.vision.sharpness import assess as assess_sharpness
 
 
 @dataclass
@@ -99,12 +100,31 @@ def ingest_image(
     else:
         normalized, homography = provisional, provisional_h
 
+    # markers, re-found in normalized coords: sharpness probes + block search
+    norm_markers = detect_markers(normalized, dict_name)
+    marker_boxes = [
+        tuple(map(float, cv2.boundingRect(np.asarray(m.corners, dtype=np.float32))))
+        for m in norm_markers
+    ]
+
     # literal / image regions (spec §16) are detected and masked *before* the
     # detailed recognition stages so their contents never become elements (§36)
     literals = detect_literal_assets(normalized)
     for_parsing = mask_literals(normalized, literals) if literals else normalized
 
-    metadata_block = detect_metadata_block(for_parsing)
+    metadata_block = detect_metadata_block(for_parsing, marker_boxes=marker_boxes)
+
+    # sharpness: score the page at the known fiducials (spec §9.x). Blurry input
+    # makes the thin ink unreadable; the live app gates auto-capture on this.
+    reg_marks = []
+    if metadata_block is not None and metadata_block.registration_marks:
+        from wingjournal.vision.registration import RegistrationMark
+
+        reg_marks = [
+            RegistrationMark(center=[m[0], m[1]], size=m[2], acutance=m[3])
+            for m in metadata_block.registration_marks
+        ]
+    sharp = assess_sharpness(normalized, norm_markers, reg_marks)
     page_metadata = None
     if metadata_block is not None and rec.name != "none":
         from wingjournal.recognition.metadata import read_metadata_block
@@ -140,6 +160,7 @@ def ingest_image(
         inferred_fiducials=_decoded_candidates(markers, boundary) + squares,
         metadata_block=dataclasses.asdict(metadata_block) if metadata_block else None,
         page_metadata=page_metadata,
+        sharpness=dataclasses.asdict(sharp),
         text_backend=rec.name,
         literal_assets=[dataclasses.asdict(a) for a in literals],
         detected_elements=elements,
@@ -151,9 +172,10 @@ def ingest_image(
         f"orientation {orientation.degrees} deg via {orientation.method}"
         + (" (flip ambiguous)" if orientation.flip_ambiguous else "")
     )
+    capture.notes.append(sharp.summary() + (" - BLURRY, retake" if sharp.blurry else ""))
     if metadata_block is not None:
         capture.notes.append(
-            f"metadata block: {len(metadata_block.row1_cells)}+"
+            f"metadata block via {metadata_block.detection}: {len(metadata_block.row1_cells)}+"
             f"{len(metadata_block.row2_cells)} cells (conf {metadata_block.confidence:.2f})"
         )
     if literals:

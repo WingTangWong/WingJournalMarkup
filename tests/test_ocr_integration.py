@@ -33,13 +33,15 @@ def _sheet_with_metadata() -> np.ndarray:
     sheet = render_writing_sheet(layout)
     block = detect_metadata_block(sheet)
     assert block is not None
-    fills = {0: "Research", 1: "P017", 2: "AI"}
+    # OCR-unambiguous, all-caps values (no 0/O or 1/l to trip Tesseract on a
+    # tiny 1/4" cell); the point is the pipeline + identity, not glyph accuracy
+    fills = {0: "RESEARCH", 1: "PAGE", 2: "AI"}
     for i, cell in enumerate(block.row1_cells):
         if i not in fills:
             continue
         x, y, w, h = (int(v) for v in cell)
-        cv2.putText(sheet, "#" + fills[i], (x + 12, y + int(h * 0.7)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(sheet, "#" + fills[i], (x + int(h * 0.9), y + int(h * 0.85)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2, cv2.LINE_AA)
     return sheet
 
 
@@ -50,8 +52,8 @@ def test_ingest_reads_metadata_cells(tmp_path):
     md = result.capture.page_metadata
     assert md is not None
     assert result.capture.text_backend == "tesseract"
-    assert md["page_id"] == "P017"
-    assert md["document_id"] == "Research"
+    assert md["page_id"] == "PAGE"
+    assert md["document_id"] == "RESEARCH"
 
 
 def test_ingest_store_uses_metadata_for_identity(tmp_path):
@@ -66,6 +68,6 @@ def test_ingest_store_uses_metadata_for_identity(tmp_path):
     with Store(tmp_path / "store") as store:
         ingest_path(img, tmp_path / "out", store=store, recognizer="tesseract")
         ingest_path(b, tmp_path / "out", store=store, recognizer="tesseract")
-        page = store.find_page(page_id_explicit="P017")
+        page = store.find_page(page_id_explicit="PAGE")
         assert page is not None
         assert len(page.capture_uuids) == 2  # both captures -> one page

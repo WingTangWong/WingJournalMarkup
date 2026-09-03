@@ -343,6 +343,37 @@ FiducialCandidate(
 )
 ```
 
+### 9.1 Capture Sharpness
+
+A soft capture — motion blur, missed focus, too far — rectifies into a page
+whose thin ink is unreadable, so sharpness is scored before any of it is
+trusted.
+
+Two signals, combined:
+
+- **global** — variance of the Laplacian over the page (classic focus metric);
+- **targeted** — edge acutance measured *at the known fiducials* (the corner
+  ArUco markers and the metadata-block registration marks). Their ring/border
+  edges are a known step, so a soft edge there is a soft photo, independent of
+  page content. This is the deciding signal.
+
+```python
+SharpnessReport(
+    score=0.34,                 # 0 soft .. 1 crisp
+    laplacian_variance=41.0,
+    probes=[
+        SharpnessProbe("marker:0", 0.71, sharp=True),
+        SharpnessProbe("registration:1", 0.09, sharp=False),
+        ...
+    ],
+    blurry=True,
+)
+```
+
+A live capture app **must** gate auto-shutter on `not blurry`; `ingest` records
+the whole report on the `Capture` and flags a blurry page rather than pretending
+it read clean.
+
 ---
 
 ## 10. Canonical Tag Syntax
@@ -402,6 +433,31 @@ Logical layout:
 ```
 
 The important part is **segment order**, not equal widths.
+
+### 11.1 Corner Registration Marks
+
+The four corners of the printed metadata block carry a **concentric-square
+registration mark** — a solid dark square, a bright square inside it, and a
+small dark square at the centre:
+
+```text
+◎═══════╤═══════╤═══════◎
+║ DOC ID │ PAGE ID│ TOPIC ║
+╟──┬──┼──┬──┼───────╢
+║ L│AB│BL│  RIGHT   ║
+◎═══╧═══╧═══╧═══════◎
+```
+
+Detection reads the block two ways, in order:
+
+1. **registration marks** — locate the four marks (nested dark→bright→dark
+   contours, roughly square and concentric), order them TL/TR/BR/BL, and take
+   that quad as the block. The cell grid follows from segment order. Solid ink,
+   so this survives the dim or soft photos that erase the thin rules.
+2. **ruled lines** — the morphology / projection fallback, for sheets printed
+   before the marks, hand-drawn blocks, or overlays.
+
+The marks also serve as sharpness probes (§9.1).
 
 Schema:
 
