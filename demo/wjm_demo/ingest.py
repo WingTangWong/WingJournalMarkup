@@ -19,6 +19,11 @@ _RECIPROCAL = {"LEFT": "RIGHT", "RIGHT": "LEFT", "ABOVE": "BELOW", "BELOW": "ABO
 def ingest_upload(store: DemoStore, original_name: str, data: bytes) -> dict:
     """Returns ``{capture, page, scan_uuid, diff}``."""
 
+    with store.write_lock:
+        return _ingest_upload(store, original_name, data)
+
+
+def _ingest_upload(store: DemoStore, original_name: str, data: bytes) -> dict:
     scan_uuid = str(_uuid.uuid4())
     store.archive_scan(scan_uuid, original_name, data)
 

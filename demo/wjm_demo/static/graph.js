@@ -31,9 +31,10 @@
           "text-outline-color": "#c82828" } },
       { selector: "edge", style: { width: 2, "line-color": "#148c3c",
           "target-arrow-color": "#148c3c", "target-arrow-shape": "triangle",
-          "curve-style": "bezier", label: "data(label)", "font-size": 9,
-          color: "#557", "text-background-color": "#fff",
-          "text-background-opacity": 1 } },
+          "curve-style": "bezier", label: "data(label)", "font-size": 8,
+          color: "#889", "text-rotation": "autorotate",
+          "text-background-color": "#fff", "text-background-opacity": 0.85,
+          "text-background-padding": 1 } },
       { selector: 'edge[kind = "inferred"]', style: { "line-color": "#c8c8c8",
           "target-arrow-color": "#c8c8c8", "line-style": "dashed" } },
       { selector: 'edge[kind = "document"]', style: { "line-color": "#7840a0",
@@ -41,8 +42,34 @@
           label: "", opacity: 0.6 } },
       { selector: ".sel", style: { "border-width": 3, "border-color": "#f0a000" } },
     ],
-    layout: { name: "cose", animate: false, padding: 30 },
+    layout: coseLayout(),
   });
+
+  function coseLayout() {
+    return {
+      name: "cose", animate: false, padding: 40,
+      idealEdgeLength: 150, nodeRepulsion: 12000, nodeOverlap: 24,
+      componentSpacing: 120, gravity: 0.3,
+    };
+  }
+
+  function spatialLayout() {
+    const minX = Math.min(0, ...Object.values(data.layout).map((p) => p[0]));
+    let orphanRow = 0;
+    return {
+      name: "preset", fit: true, padding: 50,
+      positions: (n) => {
+        const p = data.layout[n.id()];
+        if (p) return { x: p[0] * 150, y: p[1] * 150 };
+        return { x: (minX - 2) * 150, y: (orphanRow++) * 150 }; // orphans in a side column
+      },
+    };
+  }
+
+  // spatial layout by default when the relationships give us positions
+  if (Object.keys(data.layout).length >= 2) {
+    cy.layout(spatialLayout()).run();
+  }
 
   const detail = document.getElementById("detail");
   cy.on("tap", "node", (evt) => {
@@ -56,17 +83,8 @@
   });
 
   const spatial = document.getElementById("spatial");
+  spatial.checked = Object.keys(data.layout).length >= 2;
   spatial.addEventListener("change", () => {
-    if (spatial.checked && Object.keys(data.layout).length) {
-      cy.layout({
-        name: "preset", fit: true, padding: 40,
-        positions: (n) => {
-          const p = data.layout[n.id()];
-          return p ? { x: p[0] * 120, y: p[1] * 120 } : { x: 0, y: 0 };
-        },
-      }).run();
-    } else {
-      cy.layout({ name: "cose", animate: false, padding: 30 }).run();
-    }
+    cy.layout(spatial.checked ? spatialLayout() : coseLayout()).run();
   });
 })();

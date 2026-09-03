@@ -24,11 +24,13 @@ _BLOB_DIR = "blobs"
 
 
 class Store:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, check_same_thread: bool = True) -> None:
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / _BLOB_DIR).mkdir(exist_ok=True)
-        self.db = sqlite3.connect(self.path / _DB_NAME)
+        self.db = sqlite3.connect(
+            self.path / _DB_NAME, check_same_thread=check_same_thread
+        )
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(DDL)

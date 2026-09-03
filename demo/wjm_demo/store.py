@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,11 +47,14 @@ class DemoStore:
         self.root = Path(root)
         self.scans_dir = self.root / "scans"
         self.scans_dir.mkdir(parents=True, exist_ok=True)
-        self.wjm = Store(self.root / "store")
+        # the Flask dev server is multi-threaded; one process, so share the
+        # connections across threads and serialise writes with a lock
+        self.wjm = Store(self.root / "store", check_same_thread=False)
         self.db = sqlite3.connect(self.root / "demo.sqlite", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_DEMO_DDL)
         self.db.commit()
+        self.write_lock = threading.Lock()
 
     def close(self) -> None:
         self.wjm.close()
