@@ -1,0 +1,16 @@
+# Development + test dependencies. Mirrors [project.optional-dependencies].dev
+# in pyproject.toml, plus the runtime and OCR requirements.
+#
+#     pip install -r requirements-dev.txt
+#
+# Also install the package editable so `wingjournal` is on PATH and coverage can
+# find it:  pip install -e .
+
+-r requirements-ocr.txt
+
+pytest>=8.0
+pytest-cov>=5.0
+ruff>=0.6
+
+# Flask front-end used by demo/ and exercised by `pytest demo/tests`.
+flask>=3.0

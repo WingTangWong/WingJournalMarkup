@@ -1,0 +1,16 @@
+# Optional text-recognition dependencies (WJM milestone M4).
+#
+# `pytesseract` is only the Python binding - it also needs the system Tesseract
+# binary on PATH:
+#
+#     macOS:          brew install tesseract
+#     Debian/Ubuntu:  sudo apt-get install tesseract-ocr
+#     Fedora:         sudo dnf install tesseract
+#     Arch:           sudo pacman -S tesseract tesseract-data-eng
+#
+# Without this, `wingjournal ingest` still runs; metadata/text regions just come
+# back unread (NullRecognizer). setup.sh installs this by default.
+
+-r requirements.txt
+
+pytesseract>=0.3.10

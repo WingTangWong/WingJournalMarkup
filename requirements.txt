@@ -1,0 +1,15 @@
+# Wing Journal Markup (WJM) - runtime dependencies for the application proper.
+#
+# These mirror [project].dependencies in pyproject.toml and are what the
+# `wingjournal` / `wjm` CLI needs to run. Install the package itself with:
+#
+#     pip install -e .            # picks these up from pyproject
+#     pip install -r requirements.txt   # or pin them explicitly here
+#
+# Optional text recognition (OCR) lives in requirements-ocr.txt and also needs
+# the system `tesseract` binary. Dev/test tooling lives in requirements-dev.txt.
+# setup.sh wires all of this up.
+
+numpy>=1.26
+opencv-python-headless>=4.9
+pillow>=10.1

@@ -49,26 +49,42 @@ IoU ≈ 0.998 / orientation 100%; 3-marker ≈ 0.95 / 100%; 2-marker ≈ 0.75 / 
 
 ## Install
 
-Requires Python 3.10+.
+Requires Python 3.10+ (3.11 / 3.12 recommended for prebuilt wheels).
+
+```bash
+./setup.sh
+source .venv/bin/activate
+```
+
+`setup.sh` creates the virtualenv, installs the system Tesseract binary
+(Homebrew / apt / dnf / pacman), installs the package and all dependencies, and
+verifies the result. Re-run it any time — on an existing checkout it reuses the
+venv, fast-forwards the repo, and re-syncs dependencies. `./setup.sh --help`
+lists the flags (`--runtime` for a no-dev install, `--no-ocr`, `--no-pull`,
+`--check` to also run the tests, `--python`).
+
+Manual install:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements.txt   # runtime: numpy, opencv-python-headless, pillow
+pip install -e .
 ```
 
-`opencv-python-headless` is pulled in automatically. On a Raspberry Pi / ARM host
-the wheel is available from PyPI; no system build needed.
+`opencv-python-headless` is a plain wheel — on a Raspberry Pi / ARM host it comes
+from PyPI with no system build.
 
-Text recognition is optional. For it, install the extra **and** the system
-Tesseract binary:
+Text recognition is optional. For it, install `requirements-ocr.txt` (adds
+`pytesseract`) **and** the system Tesseract binary:
 
 ```bash
-pip install -e ".[ocr]"
+pip install -r requirements-ocr.txt
 sudo apt install tesseract-ocr        # or: brew install tesseract
 ```
 
-Without it, `ingest` still runs — metadata cells just come back unread.
+Without it, `ingest` still runs — metadata cells just come back unread. For the
+full dev toolchain (tests, lint, demo) use `requirements-dev.txt`.
 
 ## Usage
 

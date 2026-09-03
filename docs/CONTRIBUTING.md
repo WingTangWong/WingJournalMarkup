@@ -3,16 +3,31 @@
 ## Dev setup
 
 ```bash
+./setup.sh          # venv + system Tesseract + all deps + verify
+./setup.sh --check  # ... and run the test suite
+source .venv/bin/activate
+```
+
+`setup.sh` is idempotent: on an existing checkout it reuses the venv,
+fast-forwards the repo (skipped if the tree is dirty), and re-syncs deps.
+`./setup.sh --help` lists the flags (`--runtime`, `--no-ocr`, `--no-pull`,
+`--python`).
+
+Manual equivalent:
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements-dev.txt   # runtime + OCR + pytest/ruff + flask
+pip install -e .
 
 pytest
 ruff check src tests
 ```
 
-Python 3.10+. The vision stack is `opencv-python-headless` + `numpy`, both pulled
-in by `pip install -e .`.
+Python 3.10+ (3.11/3.12 recommended for wheel coverage). The vision stack is
+`opencv-python-headless` + `numpy` + `pillow` (`requirements.txt`); OCR adds
+`pytesseract` plus the system `tesseract` binary (`requirements-ocr.txt`).
 
 ## Layout
 
