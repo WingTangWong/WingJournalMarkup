@@ -17,9 +17,12 @@ help a person produce scannable pages.
 
 - ✅ `wingjournal make-sheet` — blank writing sheet: four corner ArUco
       markers (`DICT_4X4_50`, IDs 0/1/2/3 = TL/TR/BR/BL) at a physically
-      controlled size, plus an empty two-row metadata block (spec §11);
-      `--paper letter|a4|legal`, `--pages`, `--marker-mm`, `--ruled`; writes
-      PDF or PNG by output extension. Ready-made Letter sheets in `samples/`
+      controlled size, their outer edge on the ¼-inch print margin so they
+      hug the paper corners, plus an empty two-row metadata block with ¼-inch
+      rows sitting in the span between the top two markers, vertically centred
+      within the marker height (spec §11); `--paper letter|a4|legal`,
+      `--pages`, `--marker-mm`, `--margin-mm`, `--ruled`; writes PDF or PNG by
+      output extension. Ready-made Letter sheets in `samples/`
 - ✅ `wingjournal make-legend` — one-page markup cheat-sheet PDF distilled from
       spec §10–22 (tags, bullet states, boxes, literal region, arrows, temporal,
       contacts, anchors/references, fiducials)

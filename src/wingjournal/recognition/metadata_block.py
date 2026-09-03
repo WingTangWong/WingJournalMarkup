@@ -88,7 +88,9 @@ def detect_metadata_block(
         x, y, bw, bh = cv2.boundingRect(c)
         if bw < 0.55 * w or bh < 0.02 * h:
             continue
-        if not (2.0 <= bw / max(bh, 1) <= 14.0):
+        # the block spans the gap between the top markers with two 1/4" rows
+        # (~12:1 at defaults); allow headroom for thinner rows / wider paper
+        if not (2.0 <= bw / max(bh, 1) <= 24.0):
             continue
         if best is None or bw * bh > best[2] * best[3]:
             best = (x, y, bw, bh)

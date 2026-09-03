@@ -25,6 +25,10 @@ from wingjournal import __version__
 # `version` do not have to import OpenCV. test_cli guards the two against drift.
 _DEFAULT_DICT = "DICT_4X4_50"
 
+# Mirror of templates.geometry.PRINT_MARGIN_MM (kept here to keep `--help` free
+# of the Pillow import). test_cli guards the two against drift.
+_PRINT_MARGIN_MM = 25.4 / 4
+
 
 def _cmd_version(_args: argparse.Namespace) -> int:
     print(f"wingjournal {__version__}")
@@ -175,7 +179,8 @@ def _cmd_make_sheet(args: argparse.Namespace) -> int:
 
     out = build_writing_sheet(
         args.out, paper=args.paper, pages=args.pages, dpi=args.dpi,
-        dict_name=args.dict, marker_mm=args.marker_mm, ruled=args.ruled,
+        dict_name=args.dict, marker_mm=args.marker_mm, margin_mm=args.margin_mm,
+        ruled=args.ruled,
     )
     print(f"wrote {out} ({args.pages} page(s), {args.paper}, {args.dpi} dpi)")
     return 0
@@ -253,6 +258,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sheet.add_argument("--dpi", type=int, default=300)
     p_sheet.add_argument("--dict", default=_DEFAULT_DICT, help="ArUco dictionary name")
     p_sheet.add_argument("--marker-mm", type=float, default=18.0, help="marker size in mm")
+    p_sheet.add_argument(
+        "--margin-mm", type=float, default=_PRINT_MARGIN_MM,
+        help="paper edge -> marker outer edge, in mm (default: 1/4in print margin)",
+    )
     p_sheet.add_argument("--ruled", action="store_true", help="faint ruled lines in the body")
     p_sheet.set_defaults(func=_cmd_make_sheet)
 

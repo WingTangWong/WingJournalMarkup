@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from wingjournal.templates._render import load_font, save_pdf, to_pil
-from wingjournal.templates.geometry import SheetLayout, compute_layout
+from wingjournal.templates.geometry import PRINT_MARGIN_MM, SheetLayout, compute_layout
 from wingjournal.vision.aruco import DEFAULT_DICT, generate_marker
 
 _RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
@@ -78,21 +78,28 @@ def render_writing_sheet(
 
     _draw_metadata_block(draw, layout)
 
+    # Informational text is centred horizontally and clear of the non-printable
+    # border: the footer rides the bottom-marker row (nothing else is there); the
+    # page label goes in the strip below the top markers, above the body, since
+    # the metadata block now occupies the top-marker row.
+    def _centred_text(text: str, font, y_centre: int) -> None:
+        tb = draw.textbbox((0, 0), text, font=font)
+        tx = (layout.width_px - (tb[2] - tb[0])) // 2
+        draw.text((tx, y_centre - (tb[3] - tb[1]) // 2 - tb[1]), text, font=font, fill=_FOOT)
+
     foot = (
         f"Wing Journal Markup - writing sheet - {dict_name} - "
         f"marker IDs 0/1/2/3 = TL/TR/BR/BL"
     )
-    foot_font = load_font(max(11, layout.dpi // 22))
-    fb = draw.textbbox((0, 0), foot, font=foot_font)
-    fx = (layout.width_px - (fb[2] - fb[0])) // 2
-    fy = layout.height_px - layout.margin_px // 2 - (fb[3] - fb[1]) // 2
-    draw.text((fx, fy), foot, font=foot_font, fill=_FOOT)
+    bl_y = layout.marker_xy["BOTTOM_LEFT"][1]
+    _centred_text(foot, load_font(max(11, layout.dpi // 22)), bl_y + layout.marker_px // 2)
 
     if page_label:
-        lf = load_font(max(11, layout.dpi // 20))
-        lb = draw.textbbox((0, 0), page_label, font=lf)
-        lx = (layout.width_px - (lb[2] - lb[0])) // 2
-        draw.text((lx, layout.margin_px // 3), page_label, font=lf, fill=_FOOT)
+        top_band = layout.margin_px + layout.marker_px
+        _centred_text(
+            page_label, load_font(max(11, layout.dpi // 22)),
+            (top_band + layout.body_top_px) // 2,
+        )
 
     return np.asarray(img)[:, :, ::-1].copy()  # RGB -> BGR
 
@@ -104,7 +111,7 @@ def build_writing_sheet(
     dpi: int = 300,
     dict_name: str = DEFAULT_DICT,
     marker_mm: float = 18.0,
-    margin_mm: float = 12.0,
+    margin_mm: float = PRINT_MARGIN_MM,
     ruled: bool = False,
 ) -> Path:
     """Write a writing sheet. ``.pdf`` -> PDF (multi-page ok); an image suffix

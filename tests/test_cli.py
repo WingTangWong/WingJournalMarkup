@@ -64,6 +64,13 @@ def test_cli_default_dict_matches_aruco():
     assert _DEFAULT_DICT == DEFAULT_DICT
 
 
+def test_cli_print_margin_matches_geometry():
+    from wingjournal.cli import _PRINT_MARGIN_MM
+    from wingjournal.templates.geometry import PRINT_MARGIN_MM
+
+    assert _PRINT_MARGIN_MM == PRINT_MARGIN_MM
+
+
 def test_show_page_without_store_errors(tmp_path):
     assert main(["show-page", "Research:P017", "--store", str(tmp_path / "nope")]) == 1
 
