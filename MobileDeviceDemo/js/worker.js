@@ -10,10 +10,16 @@
  *   ←    { type:"ready", hasAruco } | { type:"error", message }
  *   main → { type:"detect",  seq, width, height, buffer }         // live frame, RGBA transferred
  *   ←    { type:"markers",  seq, markers }
- *   main → { type:"analyze", seq, width, height, buffer, markers } // full-res capture, RGBA
+ *   main → { type:"analyze", seq, width, height, buffer, markers, mode, gate } // full-res capture, RGBA
  *   ←    { type:"progress", seq, stage }
  *   ←    { type:"analyzed", seq, geometry, rectified:{buffer,width,height} }
+ *   ←    { type:"analyzed", seq, rejected:"blurry", sharpness, soft }  // gate:true only
  *   ←    { type:"analyzed", seq, error }
+ *
+ * When `gate` is set (auto-capture), the full-res grab is scored at the
+ * fiducials *before* rectify; a blurry grab is bounced back with `rejected` so
+ * the live loop can coach "move closer / hold steady" instead of showing a
+ * soft page (spec §9.1).
  *
  * The chain mirrors wingjournal.pipeline.ingest_image from perspective
  * normalization onward (markers already give the page frame + orientation):
@@ -26,7 +32,14 @@ let cv = null;
 let V = null;   // WJMVision
 let detector = null;
 
-const TARGET_LONG_PX = 1600;
+// normalized long side: never below this, never far past the page's real pixel
+// span in the grab (upscaling just interpolates), capped so the RGBA buffer we
+// ship back stays sane on a phone.
+const MIN_LONG_PX = 1600;
+const MAX_LONG_PX = 2800;
+
+const dist2 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+const clampN = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 self.onmessage = (e) => {
   const msg = e.data;
@@ -120,7 +133,7 @@ function onDetect({ seq, width, height, buffer }) {
   post({ type: "markers", seq, markers, sharpness, mode });
 }
 
-function onAnalyze({ seq, width, height, buffer, markers, mode }) {
+function onAnalyze({ seq, width, height, buffer, markers, mode, gate }) {
   const progress = (stage) => post({ type: "progress", seq, stage });
   const trash = [];
   const keep = (m) => { trash.push(m); return m; };
@@ -130,16 +143,35 @@ function onAnalyze({ seq, width, height, buffer, markers, mode }) {
 
     let quad;
     let stickerMode = mode === "stickers";
+    let shotMarkers = markers || [];
     if (stickerMode) {
       const stkm = detector.detect(graySrc).filter((m) => m.id === V.CORNER_STICKER_ID);
-      quad = V.stickerQuad(V.detectCornerStickers(cv, graySrc, stkm));
+      const stk = V.detectCornerStickers(cv, graySrc, stkm);
+      quad = V.stickerQuad(stk);
+      shotMarkers = stk.map((s) => ({ id: V.CORNER_STICKER_ID, role: s.role, corners: s.marker.corners }));
     } else {
       quad = V.pageQuadFromMarkers(markers || []);
     }
     if (!quad) return post({ type: "analyzed", seq, error: "need all four corner fiducials to normalize the page" });
 
+    // score the raw grab at the fiducials — rectify's upscale smooths blur, so
+    // this is the honest read of how sharp the capture actually is (spec §9.1)
+    const shot = V.assessSharpness(cv, graySrc, shotMarkers, []);
+    if (gate && shot.blurry) {
+      return post({
+        type: "analyzed", seq, rejected: "blurry", sharpness: shot,
+        soft: (shot.probes || []).filter((p) => !p.sharp).map((p) => p.name),
+      });
+    }
+
     progress("rectify");
-    const { mat: normalized, width: nw, height: nh } = V.rectify(cv, src, quad);
+    // don't blow the page up past the pixels we actually captured
+    const qLong = Math.max(
+      dist2(quad[0], quad[1]), dist2(quad[1], quad[2]),
+      dist2(quad[2], quad[3]), dist2(quad[3], quad[0]),
+    );
+    const targetLong = Math.round(clampN(qLong * 1.15, MIN_LONG_PX, MAX_LONG_PX));
+    const { mat: normalized, width: nw, height: nh } = V.rectify(cv, src, quad, targetLong);
     keep(normalized);
 
     const grayN = keep(grayOf(normalized));
@@ -172,7 +204,18 @@ function onAnalyze({ seq, width, height, buffer, markers, mode }) {
     const regMarks = block && block.registration_marks
       ? block.registration_marks.map((m) => ({ center: [m[0], m[1]], size: m[2], acutance: m[3] }))
       : [];
-    const sharpness = V.assessSharpness(cv, grayN, normMarkers, regMarks);
+    // the raw grab (pre-rectify) is the ground truth for "was this photo sharp":
+    // warpPerspective's cubic upscale always softens edges a little, so the
+    // rectified probes are reported for detail but don't drive the verdict
+    const rect = V.assessSharpness(cv, grayN, normMarkers, regMarks);
+    const sharpness = {
+      ...shot,
+      rectified_score: rect.score,
+      rectified_blurry: rect.blurry,
+      probes: (shot.probes || [])
+        .map((p) => ({ ...p, name: `shot:${p.name}` }))
+        .concat(rect.probes || []),
+    };
 
     progress("segmenting text");
     const skipTop = block ? (block.bbox[1] + block.bbox[3]) / nh : 0;
@@ -185,7 +228,7 @@ function onAnalyze({ seq, width, height, buffer, markers, mode }) {
       source: { width, height },
       page_frame_quad: quad.map(([x, y]) => [round3(x), round3(y)]),
       orientation: { method: stickerMode ? "geometry" : "aruco_ids", degrees: 0 },
-      normalized: { width: nw, height: nh, target_long_px: TARGET_LONG_PX },
+      normalized: { width: nw, height: nh, target_long_px: targetLong },
       page_size_estimate: pageSize,
       detected_fiducials: (markers || []).map((m) => ({
         id: m.id, role: m.role,

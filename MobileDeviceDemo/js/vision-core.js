@@ -6,7 +6,8 @@
  *   dictionary  DICT_4X4_50
  *   ids         0/1/2/3 = TOP_LEFT / TOP_RIGHT / BOTTOM_RIGHT / BOTTOM_LEFT
  *   page frame  outer corner of each of the 4 markers, ordered TL,TR,BR,BL
- *   normalized  longer side 1600 px, aspect from the quad clamped to [1.15, 1.6]
+ *   normalized  longer side = rectify()'s targetLong (default 1600), aspect
+ *               from the quad clamped to [1.15, 1.6]
  */
 (function (root) {
   "use strict";
@@ -122,6 +123,7 @@
   // wingjournal.vision.rectify.output_size
   function outputSize(quad, targetLong) {
     targetLong = targetLong || TARGET_LONG_PX;
+    targetLong = Math.max(1, Math.round(targetLong));
     const [tl, tr, br, bl] = quad;
     const width = Math.max(dist(tl, tr), dist(bl, br));
     const height = Math.max(dist(tl, bl), dist(tr, br));
@@ -138,8 +140,8 @@
    * Perspective-normalize the page.
    * @returns {{mat: cv.Mat, width:number, height:number}} caller deletes mat
    */
-  function rectify(cv, srcMat, quad) {
-    const [w, h] = outputSize(quad);
+  function rectify(cv, srcMat, quad, targetLong) {
+    const [w, h] = outputSize(quad, targetLong);
     const src = cv.matFromArray(4, 1, cv.CV_32FC2, quad.flat());
     const dst = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, w - 1, 0, w - 1, h - 1, 0, h - 1]);
     const Hm = cv.getPerspectiveTransform(src, dst);

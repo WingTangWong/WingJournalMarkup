@@ -54,27 +54,38 @@ also gives you HTTPS without certs.
 
 | Where | What |
 |---|---|
-| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection + a fast frame-sharpness score; on capture: rectify → literal-region detect + mask → metadata-block detect (registration marks, ruled-line fallback) → sharpness at the fiducials → text-line segmentation. Keeps the 11 MB compile and all pixel work off the UI thread. |
+| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection + a fast frame-sharpness score; on capture: **score the raw grab at the fiducials (gate — a soft auto-grab is rejected)** → rectify → literal-region detect + mask → metadata-block detect (registration marks, ruled-line fallback) → sharpness at the fiducials → text-line segmentation. Keeps the 11 MB compile and all pixel work off the UI thread. |
 | **Tesseract.js** (its own worker, spawned from the main thread) | OCR of the metadata cells and each body line off the rectified page. |
 | **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR → parse. |
 | **`js/wjm-parse.js`** | The WJM grammar + element parser (bullets, tags, temporal, references, contacts). Pure text, no dependencies. |
 
 ### The capture flow
 
-1. Camera → hidden ≤900 px canvas; `getImageData` buffer transferred to the
+The live feed only gets the **lock**; the actual analysis runs on a full-frame
+grab, and a soft grab bounces straight back to the feed to re-focus.
+
+1. On start, the track is pushed to the sensor's max resolution +
+   continuous autofocus (`applyConstraints`; Safari/iOS has no
+   `ImageCapture.takePhoto()`, so the "photo" is the best frame the stream gives).
+2. Camera → hidden ≤900 px canvas; `getImageData` buffer transferred to the
    worker ~14×/s → `aruco_ArucoDetector` (`DICT_4X4_50`, sub-pixel corners).
    Four id-`10` markers → **sticker mode**: roles from geometry + the wedge
    direction, page corners from the wedge tips, page size from the sticker scale.
-2. Guide test on the main thread: every marker's four corners inside the guide
-   rectangle, and large enough (rejects "too far").
-3. All of ids 0/1/2/3 inside, **the frame sharp enough**, and stable for 450 ms →
-   auto-shutter (toggle **Auto** off for manual only; a soft frame shows "Too
-   blurry — hold steady").
-4. Worker rectifies (page quad from the *outer* corner of each marker,
-   `warpPerspective`, longer side 1600 px, aspect clamped `[1.15, 1.6]` — same
-   as the CLI) and returns the normalized page + the metadata-block grid + the
-   body-line boxes.
-5. Main thread OCRs each cell and line, runs `wjm-parse`, and assembles the
+3. Guide test on the main thread: every marker's four corners inside the guide
+   rectangle, and large enough (rejects "too far"). The guide brackets go
+   **red → orange → yellow → green** as the lock firms up.
+4. All of ids 0/1/2/3 inside, the live frame sharp enough, and stable for 450 ms
+   → grab the **full-resolution frame** and hand it to the worker (toggle
+   **Auto** off for manual only).
+5. Worker scores the raw grab at the fiducials *before* rectifying. If any
+   fiducial is soft the grab is **rejected** — the app coaches ("soft at top
+   left — move closer & hold steady", the soft markers flash red) and drops back
+   to step 3. Manual shutter skips this gate and always produces a report.
+6. On a sharp grab the worker rectifies (page quad from the *outer* corner of
+   each marker, `warpPerspective`, aspect clamped `[1.15, 1.6]`; long side scales
+   with the page's real pixel span, `1600–2800 px`) and returns the normalized
+   page + the metadata-block grid + the body-line boxes.
+7. Main thread OCRs each cell and line, runs `wjm-parse`, and assembles the
    capture record.
 
 ### The captured report
@@ -95,16 +106,17 @@ back:
 - **Page body**: each segmented text line as its crop + OCR text + the element
   it parsed to; literal regions shown as *as-is image*.
 
-Three downloads: the full-res **photo** (JPEG), the **rectified page** (PNG),
+Three downloads: the full-res **photo** (JPEG), the **rectified page** (JPEG),
 and the **capture data** (JSON — crops omitted to keep it small):
 
 ```jsonc
 {
   "dictionary": "DICT_4X4_50",
-  "source": { "width": 1920, "height": 1080 },
+  "source": { "width": 4032, "height": 3024 },
   "page_frame_quad": [[x,y], …],            // outer marker corners, TL,TR,BR,BL
-  "normalized": { "width": 1219, "height": 1600, "target_long_px": 1600 },
+  "normalized": { "width": 2139, "height": 2800, "target_long_px": 2800 },
   "detected_fiducials": [ { "id":0, "role":"TOP_LEFT", "corners":[…], "center":[…] }, … ],
+  "sharpness": { "score":0.71, "blurry":false, "rectified_score":0.55, "probes":[ … ] },
   "metadata_block": { "bbox":[…], "row1_cells":[…], "row2_cells":[…], "confidence":0.97 },
   "page_metadata": { "document_id":"Research", "page_id":"P017",
                      "topic_tags":["AI"], "left":null, "above":null,

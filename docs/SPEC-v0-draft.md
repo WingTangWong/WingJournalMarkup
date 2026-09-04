@@ -374,6 +374,19 @@ A live capture app **must** gate auto-shutter on `not blurry`; `ingest` records
 the whole report on the `Capture` and flags a blurry page rather than pretending
 it read clean.
 
+**Score the grab, not the rectified page.** Perspective normalization upscales
+(cubic), which smooths every edge and makes a soft photo look passable. The
+sharpness that gates a capture is measured on the *raw* full-resolution frame at
+the fiducials, before rectify. Probes taken on the normalized page may still be
+reported for detail, but they do not decide `blurry`.
+
+**Two-phase capture.** The live video feed is only for the lock; the frame that
+gets analyzed is a full-resolution grab taken once the lock holds. A grab that
+fails the fiducial sharpness check is rejected outright — the app names the soft
+fiducials, tells the user to move closer / hold steady / let it focus, and
+returns to the live feed to re-lock. Nothing soft is ever shown as a result.
+(Manual shutter is the user's explicit override and skips the gate.)
+
 ---
 
 ## 10. Canonical Tag Syntax

@@ -71,13 +71,21 @@ cv.onRuntimeInitialized = () => {
     assert.ok(Math.abs(quad[2][0] - (W - M)) < 4, "BR x ~ W-60");
   });
 
-  t("rectify -> 1600 long side, plausible aspect", () => {
+  t("rectify -> 1600 long side default, plausible aspect", () => {
     const det = new V.MarkerDetector(cv);
     const quad = V.pageQuadFromMarkers(det.detect(sheet));
     const { mat, width, height } = V.rectify(cv, sheet, quad);
     assert.equal(Math.max(width, height), 1600);
     const ar = Math.max(width, height) / Math.min(width, height);
     assert.ok(ar >= 1.15 && ar <= 1.6, "aspect " + ar);
+    mat.delete();
+  });
+
+  t("rectify -> honours an explicit targetLong", () => {
+    const det = new V.MarkerDetector(cv);
+    const quad = V.pageQuadFromMarkers(det.detect(sheet));
+    const { mat, width, height } = V.rectify(cv, sheet, quad, 2800);
+    assert.equal(Math.max(width, height), 2800);
     mat.delete();
   });
 

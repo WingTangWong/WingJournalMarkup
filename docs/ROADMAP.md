@@ -81,6 +81,13 @@ stage-for-stage map in `MobileDeviceDemo/README.md`.
 - ✅ Ports of `vision/registration.py` + `vision/sharpness.py`: metadata block
       from the concentric-square marks, and a hard sharpness gate on auto-capture
       (spec §9.1, §11.1)
+- ✅ Two-phase capture (spec §9.1): live feed for lock-on only
+      (red→orange→yellow→green), then a full-resolution grab; the grab is scored
+      at the fiducials *before* rectify and a soft auto-grab is rejected with
+      "move closer / hold steady" coaching + the soft markers flagged, dropping
+      back to the feed. Track pushed to sensor-max + continuous AF on start
+      (no `ImageCapture` on Safari). Normalized long side scales with the page's
+      real pixel span (1600–2800 px) instead of a fixed 1600
 - ✅ Port of `vision/corner_sticker.py`: **sticker mode** — four id-10 stickers
       → roles + page quad from geometry/wedge tips, physical page-size estimate
       shown in the report (spec §11.2)

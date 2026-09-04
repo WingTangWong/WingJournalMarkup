@@ -28,6 +28,11 @@ const EDGE_SLACK = 0.012;     // fraction of guide width tolerated outside the b
 const MIN_MARKER_FRAC = 0.018; // reject markers smaller than this * guide width
 const LIVE_MIN_SHARPNESS = 0.32; // auto-shutter blocked below this frame score
 const JPEG_QUALITY = 0.92;
+const HOLD_GREEN_FRAC = 0.55;    // ring fill past which the guide turns green
+const REJECT_COOLDOWN_MS = 1100; // after a blurry grab, coach for this long before re-arming
+
+// red → orange → yellow → green as the lock firms up
+const PHASE_COLOR = { seek: "#e5533d", frame: "#e8873a", hold: "#f2c14e", sharp: "#2ecc71" };
 
 // ---- dom --------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
@@ -55,6 +60,9 @@ let markers = [];            // latest markers, in intrinsic (full-res) pixels
 let markersAt = 0;
 let frameSharp = null;       // {score, blurry} for the latest frame
 let fiducialMode = "sheet";  // "sheet" | "stickers"
+let cooldownUntil = 0;       // re-arm auto-capture only after this (post-reject coaching)
+let coachMsg = "";           // what the last blurry grab told the user to fix
+let softRoles = new Set();   // fiducials the last grab found soft, for the overlay
 let recognizer = null;
 let ocrBackend = "none";
 const analyzeWaiters = new Map();
@@ -129,8 +137,8 @@ async function start() {
       audio: false,
       video: {
         facingMode: { ideal: facing },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
+        width: { ideal: 3840 },
+        height: { ideal: 2160 },
       },
     });
     track = stream.getVideoTracks()[0];
@@ -138,6 +146,7 @@ async function start() {
     await video.play().catch(() => {});
     // a canvas/stream source can reach metadata before we could attach a listener
     if (video.readyState < 1) await once(video, "loadedmetadata");
+    await maximizeResolution();
 
     const vw = video.videoWidth || 1280;
     const vh = video.videoHeight || 720;
@@ -150,6 +159,9 @@ async function start() {
     running = true;
     lockStart = 0;
     markers = [];
+    cooldownUntil = 0;
+    coachMsg = "";
+    softRoles = new Set();
     requestAnimationFrame(loop);
   } catch (err) {
     $("btn-start").disabled = false;
@@ -182,6 +194,32 @@ function setupTorchButton() {
   } else {
     btn.hidden = true;
   }
+}
+
+// Push the live track to the sensor's best resolution + continuous autofocus.
+// Safari/iOS has no ImageCapture.takePhoto(), so the "sharp photo" is just the
+// best frame this stream can give — ask for as much as the hardware allows.
+async function maximizeResolution() {
+  if (!track || !track.getCapabilities) return;
+  let caps;
+  try { caps = track.getCapabilities(); } catch { return; }
+  const want = {};
+  // cap at ~4K: past that the stream often can't hold framerate and some
+  // phones just fail the constraint outright
+  if (caps.width && caps.width.max) want.width = { ideal: Math.min(caps.width.max, 3840) };
+  if (caps.height && caps.height.max) want.height = { ideal: Math.min(caps.height.max, 2160) };
+  if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+    want.focusMode = "continuous";
+  }
+  if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes("continuous")) {
+    want.exposureMode = "continuous";
+  }
+  if (!Object.keys(want).length) return;
+  try {
+    await track.applyConstraints(want);
+    // give the sensor a beat to actually switch mode / refocus
+    await new Promise((r) => setTimeout(r, 250));
+  } catch { /* keep whatever getUserMedia gave us */ }
 }
 
 // ---- main loop --------------------------------------------------
@@ -217,20 +255,30 @@ function loop(ts) {
   // rectified page against the stricter threshold
   const blurry = !!(frameSharp && frameSharp.score < LIVE_MIN_SHARPNESS);
 
-  updatePips(goodRoles);
-  drawOverlay(assessed, guide, view, allIn && fresh && !blurry);
-  updateStatus(assessed, goodRoles, blurry);
+  const cooling = performance.now() < cooldownUntil;
+  if (!cooling && coachMsg) { coachMsg = ""; softRoles = new Set(); }
 
-  // hard gate: auto-shutter only on a sharp frame (spec §9.1)
-  if (allIn && fresh && !blurry && $("chk-auto").checked && !busy) {
+  // lock firms up as: corners seen (orange) → all inside & steady (yellow) →
+  // held long enough on a sharp frame (green) → grab + verify the real photo
+  const armed = allIn && fresh && !blurry && !cooling;
+  if (armed && $("chk-auto").checked && !busy) {
     if (!lockStart) lockStart = ts;
-    const held = ts - lockStart;
-    setLockRing(Math.min(1, held / HOLD_MS));
-    if (held >= HOLD_MS) capture("auto");
   } else {
     lockStart = 0;
-    setLockRing(0);
   }
+  const held = lockStart ? ts - lockStart : 0;
+  setLockRing(lockStart ? Math.min(1, held / HOLD_MS) : 0);
+
+  let phase;
+  if (goodRoles.size < 4) phase = assessed.length ? "frame" : "seek";
+  else if (blurry || cooling || !lockStart) phase = "hold";
+  else phase = held >= HOLD_MS * HOLD_GREEN_FRAC ? "sharp" : "hold";
+
+  updatePips(goodRoles);
+  drawOverlay(assessed, guide, view, phase);
+  updateStatus(assessed, goodRoles, blurry, cooling);
+
+  if (lockStart && held >= HOLD_MS && !busy) capture("auto");
 }
 
 // ---- geometry -------------------------------------------------
@@ -278,7 +326,7 @@ function assessMarker(m, gi) {
 }
 
 // ---- rendering -----------------------------------------------
-function drawOverlay(assessed, guide, view, locked) {
+function drawOverlay(assessed, guide, view, phase) {
   const dpr = window.devicePixelRatio || 1;
   const W = Math.round(view.cssW * dpr);
   const H = Math.round(view.cssH * dpr);
@@ -293,8 +341,8 @@ function drawOverlay(assessed, guide, view, locked) {
   octx.rect(guide.x, guide.y, guide.w, guide.h);
   octx.fill("evenodd");
 
-  // corner brackets
-  const col = locked ? "#2ecc71" : "#f2c14e";
+  // corner brackets — colour tracks the lock phase
+  const col = PHASE_COLOR[phase] || PHASE_COLOR.hold;
   const L = Math.min(guide.w, guide.h) * 0.12;
   octx.strokeStyle = col;
   octx.lineWidth = 4;
@@ -316,7 +364,8 @@ function drawOverlay(assessed, guide, view, locked) {
     octx.beginPath();
     pts.forEach(([x, y], i) => (i ? octx.lineTo(x, y) : octx.moveTo(x, y)));
     octx.closePath();
-    const ok = a.inside && a.bigEnough && a.marker.role !== null;
+    const soft = a.marker.role && softRoles.has(a.marker.role);
+    const ok = a.inside && a.bigEnough && a.marker.role !== null && !soft;
     octx.strokeStyle = ok ? "#2ecc71" : "#e5533d";
     octx.fillStyle = ok ? "rgba(46,204,113,0.22)" : "rgba(229,83,61,0.16)";
     octx.lineWidth = 3;
@@ -327,7 +376,8 @@ function drawOverlay(assessed, guide, view, locked) {
     octx.fillStyle = "#fff";
     octx.font = "700 12px -apple-system, system-ui, sans-serif";
     octx.textAlign = "center";
-    octx.fillText(a.marker.role ? a.marker.role.replace("_", " ") : `#${a.marker.id}`, lx, ly + 4);
+    const tag = a.marker.role ? a.marker.role.replace("_", " ") : `#${a.marker.id}`;
+    octx.fillText(soft ? `${tag} · soft` : tag, lx, ly + 4);
   }
 }
 
@@ -335,9 +385,11 @@ function updatePips(goodRoles) {
   for (const [role, el] of Object.entries(pips)) el.classList.toggle("on", goodRoles.has(role));
 }
 
-function updateStatus(assessed, goodRoles, blurry) {
+function updateStatus(assessed, goodRoles, blurry, cooling) {
   const n = assessed.length;
-  if (goodRoles.size === 4 && blurry) {
+  if (cooling && coachMsg) {
+    setStatus(coachMsg, "warn");
+  } else if (goodRoles.size === 4 && blurry) {
     setStatus("Too blurry — hold steady", "warn");
   } else if (goodRoles.size === 4) {
     setStatus("Hold still…", "ok");
@@ -385,20 +437,42 @@ async function capture(trigger) {
 
   const capturedMarkers = markers; // already intrinsic (full-res) pixels
   const stamp = new Date();
+  const gate = trigger === "auto"; // manual shutter always produces a result
 
-  setStatus("Analyzing…", "ok");
+  setStatus(gate ? "Checking sharpness…" : "Analyzing…", "ok");
   const full = gctx.getImageData(0, 0, vw, vh);
   const seqId = ++seq;
   const msg = await new Promise((resolve) => {
     analyzeWaiters.set(seqId, resolve);
     worker.postMessage(
-      { type: "analyze", seq: seqId, width: vw, height: vh, buffer: full.data.buffer, markers: capturedMarkers, mode: fiducialMode },
+      { type: "analyze", seq: seqId, width: vw, height: vh, buffer: full.data.buffer, markers: capturedMarkers, mode: fiducialMode, gate },
       [full.data.buffer],
     );
     setTimeout(() => {
       if (analyzeWaiters.has(seqId)) { analyzeWaiters.delete(seqId); resolve({ error: "analysis timed out" }); }
     }, 20000);
   });
+
+  // the real photo came back soft — coach and drop straight back to the live
+  // feed to re-focus and re-lock (spec §9.1)
+  if (msg && msg.rejected) {
+    const roles = (msg.soft || [])
+      .map((n) => { const m = /(\d+)$/.exec(n); return m ? ROLE_ORDER[+m[1]] : null; })
+      .filter(Boolean);
+    softRoles = new Set(roles);
+    coachMsg = roles.length
+      ? `Soft at ${roles.map((r) => r.replace("_", " ").toLowerCase()).join(", ")} — move closer & hold steady`
+      : "Too blurry — move closer, steady the phone, let it focus";
+    cooldownUntil = performance.now() + REJECT_COOLDOWN_MS;
+    navigator.vibrate?.(120);
+    setStatus(coachMsg, "warn");
+    lockStart = 0;
+    setLockRing(0);
+    busy = false;
+    running = true;
+    requestAnimationFrame(loop);
+    return;
+  }
 
   const rawUrl = await canvasUrl(grabCanvas, "image/jpeg", JPEG_QUALITY);
   let capture;
@@ -411,7 +485,10 @@ async function capture(trigger) {
     rectCanvas.getContext("2d").putImageData(
       new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0,
     );
-    rectUrl = await canvasUrl(rectCanvas, "image/png");
+    // JPEG: the rectified page can now be ~2800 px on the long side and a PNG
+    // encode of that stalls the main thread; OCR crops come off rectCanvas
+    // (the raw pixels), not this URL, so quality there is unaffected
+    rectUrl = await canvasUrl(rectCanvas, "image/jpeg", JPEG_QUALITY);
     capture = await runExtraction(msg.geometry, rectCanvas);
   } else {
     capture = {
@@ -628,7 +705,7 @@ function annotateRectified(capture) {
   }
   for (const lb of capture.line_boxes || []) box(lb, "rgba(46,204,113,0.9)");
   for (const lit of capture.literal_assets || []) box(lit.bbox, "rgba(90,160,255,0.95)");
-  return cnv.toDataURL("image/png");
+  return cnv.toDataURL("image/jpeg", JPEG_QUALITY);
 }
 
 function showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error }) {
@@ -647,7 +724,7 @@ function showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error }) {
   const slug = stamp.toISOString().replace(/[:.]/g, "-");
   wireDownload("dl-raw", rawUrl, `wjm-${slug}.jpg`);
   wireDownload("dl-json", jsonUrl, `wjm-${slug}.json`);
-  if (rectUrl) wireDownload("dl-rect", rectUrl, `wjm-${slug}-rectified.png`);
+  if (rectUrl) wireDownload("dl-rect", rectUrl, `wjm-${slug}-rectified.jpg`);
 
   $("sec-meta").replaceChildren(...sectionExtraction(capture, error));
   $("sec-debug-meta").replaceChildren(...sectionMetadataCrops(capture));
@@ -694,6 +771,7 @@ function sectionExtraction(c, error) {
       `${s.score}  (lapvar ${s.laplacian_variance})` + (s.blurry ? "  ⚠ blurry" : ""),
       s.blurry ? "err" : "",
     ));
+    if (s.rectified_score != null) out.push(srow("  rectified score", `${s.rectified_score}`, "muted"));
     for (const p of s.probes || []) {
       out.push(srow("  " + p.name, `${p.acutance}  ${p.sharp ? "sharp" : "blurry"}`, p.sharp ? "muted" : "err"));
     }
@@ -794,6 +872,9 @@ $("btn-retake").addEventListener("click", () => {
   running = true;
   lockStart = 0;
   markers = [];
+  cooldownUntil = 0;
+  coachMsg = "";
+  softRoles = new Set();
   setStatus("Point at a WJM sheet");
   requestAnimationFrame(loop);
 });
