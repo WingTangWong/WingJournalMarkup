@@ -361,20 +361,50 @@
 
   // Warp `closeSrc` (RGBA) through H into canvas space and alpha-feather it over
   // `canvas` (RGBA), clipped to `rect` [x,y,w,h]. Mutates `canvas`.
+  //
+  // Everything happens in a small buffer sized to `rect` (+ feather padding),
+  // not the full canvas: the original version warped and float-blended at the
+  // *whole 2550x3300 canvas* for every close-up (four ~135 MB float32 buffers
+  // per call), which is fine on a dev machine but starves or hangs a phone's
+  // WASM heap — the close-up pass would silently stop responding. `H` is
+  // translated into the ROI's local coordinates so the same warp still lands
+  // in the same place.
   function compositeInto(cv, canvas, closeSrc, H, rect, feather = 14) {
-    const [rx, ry, rw, rh] = rect.map(Math.round);
+    const pad = Math.ceil(feather * 2);
+    const rx = Math.max(0, Math.round(rect[0]));
+    const ry = Math.max(0, Math.round(rect[1]));
+    const rw0 = Math.round(rect[2]);
+    const rh0 = Math.round(rect[3]);
+    const bx0 = Math.max(0, rx - pad);
+    const by0 = Math.max(0, ry - pad);
+    const bx1 = Math.min(canvas.cols, rx + rw0 + pad);
+    const by1 = Math.min(canvas.rows, ry + rh0 + pad);
+    const bw = Math.max(1, bx1 - bx0);
+    const bh = Math.max(1, by1 - by0);
+
+    // H with the ROI's top-left subtracted out (translate-then-H, expanded
+    // algebraically so no extra matrix-multiply API is required)
+    const h = H.data64F;
+    const Hroi = cv.matFromArray(3, 3, cv.CV_64F, [
+      h[0] - bx0 * h[6], h[1] - bx0 * h[7], h[2] - bx0 * h[8],
+      h[3] - by0 * h[6], h[4] - by0 * h[7], h[5] - by0 * h[8],
+      h[6], h[7], h[8],
+    ]);
+
     const warped = new cv.Mat();
     cv.warpPerspective(
-      closeSrc, warped, H, new cv.Size(canvas.cols, canvas.rows),
+      closeSrc, warped, Hroi, new cv.Size(bw, bh),
       cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0),
     );
-    // feathered rectangular mask for the target region
-    const mask = cv.Mat.zeros(canvas.rows, canvas.cols, cv.CV_8UC1);
-    cv.rectangle(
-      mask, new cv.Point(rx + feather, ry + feather),
-      new cv.Point(rx + rw - feather, ry + rh - feather),
-      new cv.Scalar(255), -1,
-    );
+    Hroi.delete();
+
+    // feathered rectangular mask, in ROI-local coords
+    const mask = cv.Mat.zeros(bh, bw, cv.CV_8UC1);
+    const mx0 = Math.max(0, rx - bx0 + feather);
+    const my0 = Math.max(0, ry - by0 + feather);
+    const mx1 = Math.min(bw, rx - bx0 + rw0 - feather);
+    const my1 = Math.min(bh, ry - by0 + rh0 - feather);
+    cv.rectangle(mask, new cv.Point(mx0, my0), new cv.Point(mx1, my1), new cv.Scalar(255), -1);
     if (feather > 0) cv.GaussianBlur(mask, mask, new cv.Size(0, 0), feather / 2);
     // also mask out where the warp produced nothing (alpha 0)
     const chans = new cv.MatVector();
@@ -386,16 +416,18 @@
     const m3 = new cv.Mat();
     cv.cvtColor(mask, m3, cv.COLOR_GRAY2RGBA);
     m3.convertTo(m3, cv.CV_32FC4, 1 / 255);
+    const roi = canvas.roi(new cv.Rect(bx0, by0, bw, bh));
     const fg = new cv.Mat();
     const bg = new cv.Mat();
     warped.convertTo(fg, cv.CV_32FC4);
-    canvas.convertTo(bg, cv.CV_32FC4);
+    roi.convertTo(bg, cv.CV_32FC4);
     cv.multiply(fg, m3, fg);
     const inv = new cv.Mat();
-    cv.subtract(new cv.Mat(m3.rows, m3.cols, cv.CV_32FC4, new cv.Scalar(1, 1, 1, 1)), m3, inv);
+    cv.subtract(new cv.Mat(bh, bw, cv.CV_32FC4, new cv.Scalar(1, 1, 1, 1)), m3, inv);
     cv.multiply(bg, inv, bg);
     cv.add(fg, bg, bg);
-    bg.convertTo(canvas, cv.CV_8UC4);
+    bg.convertTo(roi, cv.CV_8UC4);
+    roi.delete();
     warped.delete(); mask.delete(); m3.delete(); fg.delete(); bg.delete(); inv.delete();
   }
 

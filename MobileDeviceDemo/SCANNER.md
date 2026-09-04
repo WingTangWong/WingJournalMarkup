@@ -117,6 +117,21 @@ shades regions that never received a close-up.
 - **C — convergence.** ⬜ REASSESS with `pass < 2` cap and "still soft" review
   shading.
 
+### Phase B — fixed: compositing memory
+
+`compositeInto` originally warped and float-blended at the **whole 2550x3300
+canvas** for every close-up — four ~135 MB float32 buffers per call (~500 MB+
+peak). Fine on a dev machine; on a phone it stalls or exhausts the WASM heap,
+which is what made the close-up pass look like it "never triggers" (the burst
+and worker round-trip were actually running — verified end to end with a
+mocked camera stream and instrumented state — they just took ~12s+ and would
+be far worse on real mobile hardware). Now every buffer is scoped to the
+target rect (+ feather padding), typically 10-20x smaller; `H` is translated
+into the ROI's local coordinates so the warp still lands in the same place.
+Also fixed: a **manually** captured base page used to skip the close-up pass
+entirely (only an auto-triggered base offered it) — now any base capture with
+planned targets offers close-ups.
+
 ### Phase B — still to tune
 
 - Target planning is structural ("box clues"), not yet a real blur/detail grid

@@ -208,6 +208,34 @@ cv.onRuntimeInitialized = () => {
     page.delete(); one.delete(); mk.delete(); tri.delete(); tv.delete();
   });
 
+  t("compositeInto -> pastes only inside the target rect, and fast", () => {
+    // a page-scale canvas (2550x3300-ish) filled with one colour, and a small
+    // close-up filled with a different colour + full alpha
+    const CW = 2550, CH = 3300;
+    const canvas = new cv.Mat(CH, CW, cv.CV_8UC4, new cv.Scalar(200, 200, 200, 255));
+    const close = new cv.Mat(400, 1200, cv.CV_8UC4, new cv.Scalar(10, 200, 10, 255));
+    const rect = [500, 300, 1200, 400]; // x, y, w, h — matches `close`'s own size
+    // identity homography (no scale/rotate — the close-up lands 1:1 at rect's origin)
+    const H = cv.matFromArray(3, 3, cv.CV_64F, [
+      1, 0, rect[0], 0, 1, rect[1], 0, 0, 1,
+    ]);
+
+    const t0 = Date.now();
+    V.compositeInto(cv, canvas, close, H, rect, 14);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 1500, `compositeInto took ${ms}ms — should be roi-scoped, not full-canvas`);
+
+    // well inside the rect (clear of the feather border): pasted colour
+    const inside = canvas.ucharPtr(rect[1] + 200, rect[0] + 600);
+    assert.ok(inside[1] > 150 && inside[0] < 80, `inside pixel wrong: ${inside}`);
+    // far outside the rect: untouched background colour
+    const outside = canvas.ucharPtr(50, 50);
+    assert.equal(outside[0], 200);
+    assert.equal(outside[1], 200);
+
+    H.delete(); canvas.delete(); close.delete();
+  });
+
   sheet.delete();
   console.log(`\n${pass} passed`);
   process.exit(process.exitCode || 0);

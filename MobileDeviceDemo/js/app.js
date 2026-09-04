@@ -671,6 +671,7 @@ const framePayload = (frames) => ({
 
 // BASE capture: burst → analyze → (close-up pass | finish)
 async function capture(trigger) {
+  dbg("capture()", trigger, { busy });
   if (busy) return;
   busy = true;
   running = false;
@@ -701,7 +702,11 @@ async function capture(trigger) {
   paintRect(msg.rectified);
 
   const targets = (msg.geometry.targets) || [];
-  if (trigger === "auto" && targets.length && $("chk-auto").checked) {
+  dbg("base analyzed", { targets: targets.length, trigger });
+  // offer close-ups whenever there's something to re-shoot, regardless of how
+  // the base was captured — "Auto" governs auto-*firing* shots, not whether
+  // the pass happens (a manual base capture used to skip it entirely)
+  if (targets.length) {
     startTargetPass(msg.geometry);
   } else {
     await showFinalReport(msg.geometry, trigger);
@@ -711,6 +716,7 @@ async function capture(trigger) {
 
 // ---- close-up pass driver ----------------------------------------
 function startTargetPass(geometry) {
+  dbg("startTargetPass", { targets: (geometry.targets || []).length });
   tgt.targets = geometry.targets || [];
   tgt.ti = 0;
   tgt.baseGeometry = geometry;
@@ -734,6 +740,7 @@ function startTargetPass(geometry) {
 }
 
 async function captureCloseup() {
+  dbg("captureCloseup()", { ti: tgt.ti, busy });
   if (busy) return;
   busy = true;
   running = false;
@@ -747,6 +754,7 @@ async function captureCloseup() {
   const msg = await ask(
     { type: "composite", targetIndex: i, markers, frames: p.frames }, p.transfer,
   );
+  dbg("composite result", { i, ok: msg && msg.ok, method: msg && msg.method, detail: msg && (msg.detail || msg.error) });
   if (msg && msg.rectified) paintRect(msg.rectified);
   tgt.results[i] = {
     ok: !!(msg && msg.ok), method: msg && msg.method,
@@ -1228,14 +1236,17 @@ $("btn-shutter").addEventListener("click", () => {
 // (anchor homography if it can, ORB otherwise), so there's no need to wait for
 // a perfect "ready" state
 $("btn-target-shutter").addEventListener("click", () => {
+  dbg("btn-target-shutter click", { mode, busy });
   if (mode === "target" && !busy) captureCloseup();
 });
 
 $("btn-skip-target").addEventListener("click", () => {
+  dbg("btn-skip-target click", { mode, busy });
   if (mode === "target" && !busy) advanceTarget();
 });
 
 $("btn-finish").addEventListener("click", () => {
+  dbg("btn-finish click", { mode, busy });
   if (mode === "target" && !busy) { tgt.ti = tgt.targets.length; finishPass(); }
 });
 
@@ -1263,8 +1274,33 @@ function fatal(msg) {
 
 window.addEventListener("beforeunload", stopStream);
 
+// dev-only: any ?debug=... turns on a small ring-buffer logger + a state
+// inspector, so a stuck close-up pass can be diagnosed after the fact
+// (window.__wjmLog(), window.__wjmState()) instead of guessed at.
+const DEBUG = new URLSearchParams(location.search).get("debug");
+const _dbgLog = [];
+function dbg(...args) {
+  if (!DEBUG) return;
+  const line = `[${new Date().toISOString().slice(11, 23)}] `
+    + args.map((a) => (typeof a === "object" ? JSON.stringify(a) : a)).join(" ");
+  _dbgLog.push(line);
+  if (_dbgLog.length > 300) _dbgLog.shift();
+  console.log(line);
+}
+if (DEBUG) {
+  window.__wjmLog = () => _dbgLog.slice();
+  window.__wjmState = () => ({
+    mode, busy, running, pending, fiducialMode,
+    liveMarkerIds: markers.map((m) => m.id),
+    tgt: {
+      ti: tgt.ti, n: tgt.targets.length, holdStart: tgt.holdStart,
+      results: tgt.results, baseMarkerIds: Object.keys(tgt.baseMarkers),
+    },
+  });
+}
+
 // dev-only: preview the close-up overlay with synthetic state (?debug=overlay)
-if (new URLSearchParams(location.search).get("debug") === "overlay") {
+if (DEBUG === "overlay") {
   window.__previewTargetOverlay = async ({ baseUrl, targets, baseMarkers, pageSize, liveMarkers, ti = 0, results = [] }) => {
     const bmp = await createImageBitmap(await (await fetch(baseUrl)).blob());
     rectCanvas.width = pageSize[0];
