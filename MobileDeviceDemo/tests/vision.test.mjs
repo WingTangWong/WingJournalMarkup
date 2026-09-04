@@ -43,6 +43,15 @@ cv.onRuntimeInitialized = () => {
   cv.line(sheet, new cv.Point(bx, by + bh / 2), new cv.Point(bx + bw, by + bh / 2), new cv.Scalar(0), 2);
   for (const f of [1 / 3, 2 / 3]) cv.line(sheet, new cv.Point(bx + bw * f, by), new cv.Point(bx + bw * f, by + bh / 2), new cv.Scalar(0), 2);
   for (const f of [1 / 4, 2 / 4, 3 / 4]) cv.line(sheet, new cv.Point(bx + bw * f, by + bh / 2), new cv.Point(bx + bw * f, by + bh), new cv.Scalar(0), 2);
+  // concentric-square registration marks at the four block corners (on a moat)
+  const REG = 26;
+  for (const [cx, cy] of [[bx, by], [bx + bw, by], [bx + bw, by + bh], [bx, by + bh]]) {
+    const sq = (frac, val) => {
+      const r = Math.round(REG * frac / 2);
+      cv.rectangle(sheet, new cv.Point(cx - r, cy - r), new cv.Point(cx + r, cy + r), new cv.Scalar(val), -1);
+    };
+    sq(1.45, 255); sq(1.0, 0); sq(0.5, 255); sq(0.22, 0);
+  }
   // a few body "text" lines
   for (let i = 0; i < 3; i++) cv.putText(sheet, "the quick brown fox", new cv.Point(120, 360 + i * 70), cv.FONT_HERSHEY_SIMPLEX, 1.0, new cv.Scalar(0), 2);
 
@@ -72,12 +81,33 @@ cv.onRuntimeInitialized = () => {
     mat.delete();
   });
 
-  t("detectMetadataBlock -> 3 + 4 cells", () => {
+  t("detectRegistrationMarks -> the four corner marks", () => {
+    const marks = V.detectRegistrationMarks(cv, sheet, [0, 0, W, 260], null);
+    assert.equal(marks.length, 4, "got " + marks.length);
+    assert.ok(marks.every((m) => m.rings >= 2 && m.acutance > 0.6));
+    assert.ok(V.marksToQuad(marks) !== null);
+  });
+
+  t("detectMetadataBlock -> registration_marks path, 3 + 4 cells", () => {
     const block = V.detectMetadataBlock(cv, sheet);
     assert.ok(block, "block found");
+    assert.equal(block.detection, "registration_marks");
+    assert.equal(block.registration_marks.length, 4);
     assert.equal(block.row1_cells.length, 3);
     assert.equal(block.row2_cells.length, 4);
     assert.ok(block.confidence >= 0.8);
+  });
+
+  t("assessSharpness -> crisp render is not blurry; blurred one is", () => {
+    const det = new V.MarkerDetector(cv);
+    const marks = V.detectRegistrationMarks(cv, sheet, [0, 0, W, 260], null);
+    const crisp = V.assessSharpness(cv, sheet, det.detect(sheet), marks);
+    assert.ok(crisp.score > 0.6 && !crisp.blurry, JSON.stringify(crisp));
+    const soft = new cv.Mat();
+    cv.GaussianBlur(sheet, soft, new cv.Size(0, 0), 4);
+    const rep = V.assessSharpness(cv, soft, det.detect(soft), []);
+    assert.ok(rep.blurry, JSON.stringify(rep));
+    soft.delete();
   });
 
   t("segmentLines -> finds the body lines", () => {

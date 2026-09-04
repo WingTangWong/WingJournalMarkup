@@ -217,12 +217,232 @@
     return cells;
   }
 
+  // ---- registration marks + sharpness (registration.py / sharpness.py) ----
+
+  // registration._edge_acutance — 0 (mush) .. 1 (crisp)
+  function edgeAcutance(gray, cx, cy, size) {
+    const h = gray.rows;
+    const w = gray.cols;
+    const half = Math.max(4, Math.floor(size * 0.7));
+    const data = gray.data;
+    const ix = Math.min(w - 1, Math.max(0, Math.round(cx)));
+    const iy = Math.min(h - 1, Math.max(0, Math.round(cy)));
+    const lines = [];
+    { // horizontal
+      const x0 = Math.max(0, ix - half);
+      const x1 = Math.min(w, ix + half);
+      const p = [];
+      for (let x = x0; x < x1; x++) p.push(data[iy * w + x]);
+      lines.push(p);
+    }
+    { // vertical
+      const y0 = Math.max(0, iy - half);
+      const y1 = Math.min(h, iy + half);
+      const p = [];
+      for (let y = y0; y < y1; y++) p.push(data[y * w + ix]);
+      lines.push(p);
+    }
+    let best = 0;
+    for (const p of lines) {
+      if (p.length < 6) continue;
+      const span = Math.max(...p) - Math.min(...p);
+      if (span < 30) continue;
+      let g = 0;
+      for (let i = 1; i < p.length; i++) g = Math.max(g, Math.abs(p[i] - p[i - 1]));
+      best = Math.max(best, g / span);
+    }
+    return Math.min(1, Math.max(0, best));
+  }
+
+  function squareish(C, cnt) {
+    const area = C.contourArea(cnt);
+    if (area < 16) return null;
+    const r = C.boundingRect(cnt);
+    if (Math.min(r.width, r.height) === 0) return null;
+    if (Math.abs(r.width - r.height) > 0.35 * Math.max(r.width, r.height)) return null;
+    if (area / (r.width * r.height) < 0.6) return null;
+    return { side: Math.max(r.width, r.height), cx: r.x + r.width / 2, cy: r.y + r.height / 2 };
+  }
+
   /**
-   * detect_metadata_block — the ruled 2-row title box near the top of the page.
-   * @returns {{bbox:number[], row_divider_y:number, row1_cells:number[][],
-   *            row2_cells:number[][], confidence:number} | null}
+   * detect_registration_marks — concentric-square marks.
+   * @returns {{center:number[], size:number, acutance:number, rings:number}[]}
    */
-  function detectMetadataBlock(C, gray, searchFrac = 0.42) {
+  function detectRegistrationMarks(C, gray, roi, exclude) {
+    let g = gray;
+    let ox = 0;
+    let oy = 0;
+    let owns = false;
+    if (roi) {
+      g = gray.roi(new C.Rect(roi[0], roi[1], roi[2], roi[3]));
+      ox = roi[0]; oy = roi[1]; owns = true;
+    }
+    const H = g.rows;
+    const W = g.cols;
+    if (H < 8 || W < 8) { if (owns) g.delete(); return []; }
+    const lo = 0.006 * Math.max(H, W);
+    const hi = 0.06 * Math.max(H, W);
+
+    const blur = new C.Mat();
+    const binary = new C.Mat();
+    C.GaussianBlur(g, blur, new C.Size(3, 3), 0);
+    C.threshold(blur, binary, 0, 255, C.THRESH_BINARY_INV | C.THRESH_OTSU);
+    const contours = new C.MatVector();
+    const hierarchy = new C.Mat();
+    C.findContours(binary, contours, hierarchy, C.RETR_CCOMP, C.CHAIN_APPROX_SIMPLE);
+    const hd = hierarchy.data32S; // [next, prev, child, parent] * n
+
+    const excl = exclude || [];
+    const hidden = (cx, cy) => excl.some(
+      ([bx, by, bw, bh]) => cx + ox >= bx && cx + ox <= bx + bw && cy + oy >= by && cy + oy <= by + bh,
+    );
+
+    const found = [];
+    for (let i = 0; i < contours.size(); i++) {
+      if (hd[i * 4 + 3] !== -1) continue; // outermost only
+      const cnt = contours.get(i);
+      const outer = squareish(C, cnt);
+      cnt.delete();
+      if (!outer || outer.side < lo || outer.side > hi || hidden(outer.cx, outer.cy)) continue;
+
+      const near = 0.25 * outer.side;
+      let rings = 1;
+      let child = hd[i * 4 + 2];
+      while (child !== -1) {
+        const cc = contours.get(child);
+        const inner = squareish(C, cc);
+        cc.delete();
+        if (inner && inner.side >= 0.12 * outer.side && inner.side <= 0.72 * outer.side
+          && Math.abs(inner.cx - outer.cx) < near && Math.abs(inner.cy - outer.cy) < near) rings += 1;
+        child = hd[child * 4];
+      }
+      if (rings < 2) continue;
+      found.push({
+        center: [outer.cx + ox, outer.cy + oy],
+        size: outer.side,
+        acutance: Math.round(edgeAcutance(g, outer.cx, outer.cy, outer.side) * 1000) / 1000,
+        rings: Math.min(rings, 3),
+      });
+    }
+
+    found.sort((a, b) => (b.rings - a.rings) || (b.acutance - a.acutance) || (b.size - a.size));
+    const out = [];
+    for (const m of found) {
+      const dup = out.some((d) =>
+        Math.abs(m.center[0] - d.center[0]) < 0.5 * m.size
+        && Math.abs(m.center[1] - d.center[1]) < 0.5 * m.size);
+      if (!dup) out.push(m);
+    }
+    blur.delete(); binary.delete(); contours.delete(); hierarchy.delete();
+    if (owns) g.delete();
+    return out.slice(0, 4);
+  }
+
+  function marksToQuad(marks) {
+    if (marks.length !== 4) return null;
+    return orderPoints(marks.map((m) => m.center));
+  }
+
+  // sharpness.laplacian_variance
+  function laplacianVariance(C, gray, roi) {
+    let g = gray;
+    let owns = false;
+    if (roi) { g = gray.roi(new C.Rect(roi[0], roi[1], roi[2], roi[3])); owns = true; }
+    const lap = new C.Mat();
+    C.Laplacian(g, lap, C.CV_64F);
+    const mean = new C.Mat();
+    const std = new C.Mat();
+    C.meanStdDev(lap, mean, std);
+    const s = std.data64F[0];
+    lap.delete(); mean.delete(); std.delete();
+    if (owns) g.delete();
+    return s * s;
+  }
+
+  const LAPVAR_FLOOR = 25;
+  const LAPVAR_CEIL = 320;
+  const MIN_ACUTANCE = 0.30;
+  const MIN_SCORE = 0.45;
+
+  /**
+   * sharpness.assess — score a page at the known fiducials.
+   * @param markers  [{id, corners}]   @param regMarks [{center, size, acutance}]
+   */
+  function assessSharpness(C, gray, markers, regMarks) {
+    const lapvar = laplacianVariance(C, gray);
+    const globalScore = clamp((lapvar - LAPVAR_FLOOR) / (LAPVAR_CEIL - LAPVAR_FLOOR), 0, 1);
+
+    const probes = [];
+    for (const m of markers || []) {
+      const p = m.corners;
+      const cx = (p[0][0] + p[1][0] + p[2][0] + p[3][0]) / 4;
+      const cy = (p[0][1] + p[1][1] + p[2][1] + p[3][1]) / 4;
+      const side = Math.hypot(p[0][0] - p[1][0], p[0][1] - p[1][1]);
+      const a = Math.round(edgeAcutance(gray, cx, cy, side) * 1000) / 1000;
+      probes.push({ name: `marker:${m.id ?? "?"}`, acutance: a, sharp: a >= MIN_ACUTANCE });
+    }
+    (regMarks || []).forEach((rm, i) => {
+      probes.push({ name: `registration:${i}`, acutance: rm.acutance, sharp: rm.acutance >= MIN_ACUTANCE });
+    });
+
+    const probeScore = probes.length
+      ? probes.reduce((s, p) => s + p.acutance, 0) / probes.length : globalScore;
+    const score = probes.length
+      ? Math.round((0.7 * probeScore + 0.3 * globalScore) * 1000) / 1000
+      : Math.round(globalScore * 1000) / 1000;
+    const blurry = score < MIN_SCORE || probes.some((p) => !p.sharp);
+    return {
+      score,
+      laplacian_variance: Math.round(lapvar * 10) / 10,
+      global_score: Math.round(globalScore * 1000) / 1000,
+      probe_score: Math.round(probeScore * 1000) / 1000,
+      probes,
+      blurry,
+    };
+  }
+
+  // metadata_block._from_registration_marks
+  function metaFromMarks(C, gray, searchFrac, markerBoxes) {
+    const h = gray.rows;
+    const w = gray.cols;
+    const band = [0, 0, w, Math.max(1, Math.floor(h * searchFrac))];
+    const marks = detectRegistrationMarks(C, gray, band, markerBoxes);
+    const quad = marksToQuad(marks);
+    if (!quad) return null;
+    const xs = quad.map((p) => p[0]);
+    const ys = quad.map((p) => p[1]);
+    const bx = Math.min(...xs);
+    const by = Math.min(...ys);
+    const bw = Math.max(...xs) - bx;
+    const bh = Math.max(...ys) - by;
+    if (bw < 0.35 * w || bh < 6 || bw / Math.max(bh, 1) < 2.0) return null;
+    const dividerY = by + bh / 2;
+    const split = (n, y0, y1) => Array.from({ length: n }, (_, i) => [bx + bw * i / n, y0, bw / n, y1 - y0]);
+    const acut = marks.reduce((s, m) => s + m.acutance, 0) / marks.length;
+    return {
+      bbox: [bx, by, bw, bh],
+      row_divider_y: dividerY,
+      row1_cells: split(3, by, dividerY),
+      row2_cells: split(4, dividerY, by + bh),
+      confidence: Math.round((0.75 + 0.25 * acut) * 1000) / 1000,
+      detection: "registration_marks",
+      registration_marks: marks.map((m) => [
+        Math.round(m.center[0] * 10) / 10, Math.round(m.center[1] * 10) / 10,
+        Math.round(m.size * 10) / 10, m.acutance,
+      ]),
+    };
+  }
+
+  /**
+   * detect_metadata_block — registration marks first, ruled lines as fallback.
+   * @returns {{bbox:number[], row_divider_y:number, row1_cells:number[][],
+   *            row2_cells:number[][], confidence:number, detection:string,
+   *            registration_marks:number[][]} | null}
+   */
+  function detectMetadataBlock(C, gray, searchFrac = 0.42, markerBoxes = null) {
+    const viaMarks = metaFromMarks(C, gray, searchFrac, markerBoxes);
+    if (viaMarks) return viaMarks;
+
     const h = gray.rows;
     const w = gray.cols;
     const topH = Math.max(1, Math.floor(h * searchFrac));
@@ -269,6 +489,8 @@
         row1_cells: r1,
         row2_cells: r2,
         confidence: Math.round((0.4 + 0.4 * cellScore + 0.2 * widthScore) * 1000) / 1000,
+        detection: "ruled_lines",
+        registration_marks: [],
       };
     }
 
@@ -430,6 +652,7 @@
     ROLE_BY_ID, ROLE_ORDER, TARGET_LONG_PX,
     hasAruco, MarkerDetector, pageQuadFromMarkers, outputSize, rectify, dist,
     detectMetadataBlock, segmentLines, detectLiteralAssets, maskLiterals,
+    detectRegistrationMarks, marksToQuad, laplacianVariance, assessSharpness, edgeAcutance,
   };
 })(typeof self !== "undefined" ? self : globalThis);
 

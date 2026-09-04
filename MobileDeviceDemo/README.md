@@ -52,7 +52,7 @@ also gives you HTTPS without certs.
 
 | Where | What |
 |---|---|
-| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; on capture: rectify → literal-region detect + mask → metadata-block detect → text-line segmentation. Keeps the 11 MB compile and all pixel work off the UI thread. |
+| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection + a fast frame-sharpness score; on capture: rectify → literal-region detect + mask → metadata-block detect (registration marks, ruled-line fallback) → sharpness at the fiducials → text-line segmentation. Keeps the 11 MB compile and all pixel work off the UI thread. |
 | **Tesseract.js** (its own worker, spawned from the main thread) | OCR of the metadata cells and each body line off the rectified page. |
 | **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR → parse. |
 | **`js/wjm-parse.js`** | The WJM grammar + element parser (bullets, tags, temporal, references, contacts). Pure text, no dependencies. |
@@ -63,8 +63,9 @@ also gives you HTTPS without certs.
    worker ~14×/s → `aruco_ArucoDetector` (`DICT_4X4_50`, sub-pixel corners).
 2. Guide test on the main thread: every marker's four corners inside the guide
    rectangle, and large enough (rejects "too far").
-3. All of ids 0/1/2/3 inside & stable for 450 ms → auto-shutter (toggle **Auto**
-   off for manual only).
+3. All of ids 0/1/2/3 inside, **the frame sharp enough**, and stable for 450 ms →
+   auto-shutter (toggle **Auto** off for manual only; a soft frame shows "Too
+   blurry — hold steady").
 4. Worker rectifies (page quad from the *outer* corner of each marker,
    `warpPerspective`, longer side 1600 px, aspect clamped `[1.15, 1.6]` — same
    as the CLI) and returns the normalized page + the metadata-block grid + the
@@ -81,7 +82,9 @@ back:
 - the **photo** and the **rectified page with every OpenCV-detected region
   outlined** (green = metadata block / cells / text lines, blue = literal image
   region);
-- the parsed **extraction** — markers, sizes, and all seven metadata fields;
+- the parsed **extraction** — markers, sizes, how the block was found
+  (registration marks / ruled lines), a **sharpness score with a per-fiducial
+  acutance table** (soft probes flagged red), and all seven metadata fields;
 - **Metadata cells — crops fed to OCR**: for each of `document_id`, `page_id`,
   `topic_tags`, `left`, `above`, `below`, `right`, the exact padded crop handed
   to Tesseract and what it read (or *nothing read*, in red);

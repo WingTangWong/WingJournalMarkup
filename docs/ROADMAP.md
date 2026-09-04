@@ -70,8 +70,12 @@ stage-for-stage map in `MobileDeviceDemo/README.md`.
       `vision.{aruco,boundary,rectify}` + `recognition.{metadata_block,segment}`
       + `vision.literal_box`; `js/wjm-parse.js` ports `recognition.{tags,parse}`
 - ✅ Output: full-res photo **+** rectified page **+** a Capture-shaped JSON with
-      `metadata_block`, `page_metadata`, `detected_elements` (each with a
-      normalized-page `bbox`), `literal_assets`, provenance — all downloadable
+      `metadata_block` (+ `detection` / `registration_marks`), `sharpness`
+      (score + per-fiducial acutance), `page_metadata`, `detected_elements`
+      (each with a normalized-page `bbox`), `literal_assets` — all downloadable
+- ✅ Ports of `vision/registration.py` + `vision/sharpness.py`: metadata block
+      from the concentric-square marks, and a hard sharpness gate on auto-capture
+      (spec §9.1, §11.1)
 - ✅ `vendor/opencv.js` + `vendor/tesseract/` committed; deployed on GitHub Pages
       (`wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/`);
       `serve.py` (HTTP / HTTPS) for local / LAN; `tests/*.mjs` re-run the Python

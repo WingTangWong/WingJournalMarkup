@@ -26,6 +26,7 @@ const HOLD_MS = 450;          // all-4-inside must persist this long to fire
 const STALE_MS = 260;         // ignore marker results older than this for the trigger
 const EDGE_SLACK = 0.012;     // fraction of guide width tolerated outside the box
 const MIN_MARKER_FRAC = 0.018; // reject markers smaller than this * guide width
+const LIVE_MIN_SHARPNESS = 0.32; // auto-shutter blocked below this frame score
 const JPEG_QUALITY = 0.92;
 
 // ---- dom --------------------------------------------------------------
@@ -52,6 +53,7 @@ let lastSent = 0;
 let lockStart = 0;
 let markers = [];            // latest markers, in intrinsic (full-res) pixels
 let markersAt = 0;
+let frameSharp = null;       // {score, blurry} for the latest frame
 let recognizer = null;
 let ocrBackend = "none";
 const analyzeWaiters = new Map();
@@ -102,6 +104,7 @@ function onWorkerMessage(e) {
         center: [mk.center[0] / k, mk.center[1] / k],
       }));
       markersAt = performance.now();
+      frameSharp = m.sharpness || null;
       break;
     }
     case "progress":
@@ -208,12 +211,16 @@ function loop(ts) {
   );
   const allIn = ROLE_ORDER.every((r) => goodRoles.has(r));
   const fresh = performance.now() - markersAt < STALE_MS;
+  // live gate is lenient (raw-frame lapvar runs low); the report re-scores the
+  // rectified page against the stricter threshold
+  const blurry = !!(frameSharp && frameSharp.score < LIVE_MIN_SHARPNESS);
 
   updatePips(goodRoles);
-  drawOverlay(assessed, guide, view, allIn && fresh);
-  updateStatus(assessed, goodRoles, allIn && fresh);
+  drawOverlay(assessed, guide, view, allIn && fresh && !blurry);
+  updateStatus(assessed, goodRoles, blurry);
 
-  if (allIn && fresh && $("chk-auto").checked && !busy) {
+  // hard gate: auto-shutter only on a sharp frame (spec §9.1)
+  if (allIn && fresh && !blurry && $("chk-auto").checked && !busy) {
     if (!lockStart) lockStart = ts;
     const held = ts - lockStart;
     setLockRing(Math.min(1, held / HOLD_MS));
@@ -326,9 +333,11 @@ function updatePips(goodRoles) {
   for (const [role, el] of Object.entries(pips)) el.classList.toggle("on", goodRoles.has(role));
 }
 
-function updateStatus(assessed, goodRoles) {
+function updateStatus(assessed, goodRoles, blurry) {
   const n = assessed.length;
-  if (goodRoles.size === 4) {
+  if (goodRoles.size === 4 && blurry) {
+    setStatus("Too blurry — hold steady", "warn");
+  } else if (goodRoles.size === 4) {
     setStatus("Hold still…", "ok");
   } else if (n === 0) {
     setStatus("Point at a WJM sheet");
@@ -452,6 +461,7 @@ async function runExtraction(geometry, rect) {
     normalized: g.normalized,
     detected_fiducials: g.detected_fiducials,
     metadata_block: g.metadata_block,
+    sharpness: g.sharpness || null,
     page_metadata: null,
     text_backend: recognizer ? recognizer.name : "none",
     literal_assets: g.literal_assets,
@@ -558,8 +568,16 @@ function capCropUrl(cnv) {
 
 function buildNotes(c) {
   const notes = [`${(c.detected_fiducials || []).length} ArUco marker(s); orientation via marker ids`];
+  if (c.sharpness) {
+    const soft = (c.sharpness.probes || []).filter((p) => !p.sharp).map((p) => p.name);
+    notes.push(
+      `sharpness ${c.sharpness.score} (lapvar ${c.sharpness.laplacian_variance})`
+      + (soft.length ? `; soft at ${soft.join(", ")}` : "")
+      + (c.sharpness.blurry ? " - BLURRY, retake" : ""),
+    );
+  }
   if (c.metadata_block) {
-    notes.push(`metadata block: ${c.metadata_block.row1_cells.length}+${c.metadata_block.row2_cells.length} cells (conf ${c.metadata_block.confidence})`);
+    notes.push(`metadata block via ${c.metadata_block.detection}: ${c.metadata_block.row1_cells.length}+${c.metadata_block.row2_cells.length} cells (conf ${c.metadata_block.confidence})`);
   }
   if (c.literal_assets && c.literal_assets.length) {
     notes.push(`${c.literal_assets.length} literal image region(s) detected and masked (spec §16)`);
@@ -590,6 +608,11 @@ function annotateRectified(capture) {
   if (mb) {
     box(mb.bbox, "rgba(46,204,113,0.95)");
     for (const c of [...mb.row1_cells, ...mb.row2_cells]) box(c, "rgba(46,204,113,0.75)");
+    // registration marks: [x, y, size, acutance] — amber if that probe is soft
+    for (const [mx, my, sz, ac] of mb.registration_marks || []) {
+      ctx.strokeStyle = ac >= 0.3 ? "rgba(46,204,113,0.95)" : "rgba(242,193,78,0.95)";
+      ctx.strokeRect(mx - sz / 2, my - sz / 2, sz, sz);
+    }
   }
   for (const lb of capture.line_boxes || []) box(lb, "rgba(46,204,113,0.9)");
   for (const lit of capture.literal_assets || []) box(lit.bbox, "rgba(90,160,255,0.95)");
@@ -639,7 +662,20 @@ function sectionExtraction(c, error) {
   out.push(srow("markers", `${(c.detected_fiducials || []).map((f) => f.id).join(", ") || "—"}  (${esc(c.dictionary || "DICT_4X4_50")})`));
   if (c.source) out.push(srow("photo", `${c.source.width}×${c.source.height}`));
   if (c.normalized) out.push(srow("rectified", `${c.normalized.width}×${c.normalized.height}`));
+  if (c.metadata_block) out.push(srow("block found via", esc(c.metadata_block.detection)));
   out.push(srow("OCR engine", esc(c.text_backend || ocrBackend)));
+
+  const s = c.sharpness;
+  if (s) {
+    out.push(srow(
+      "sharpness",
+      `${s.score}  (lapvar ${s.laplacian_variance})` + (s.blurry ? "  ⚠ blurry" : ""),
+      s.blurry ? "err" : "",
+    ));
+    for (const p of s.probes || []) {
+      out.push(srow("  " + p.name, `${p.acutance}  ${p.sharp ? "sharp" : "blurry"}`, p.sharp ? "muted" : "err"));
+    }
+  }
 
   const md = c.page_metadata || {};
   out.push(el("div", "srow", `<span class="slabel">page metadata</span><span class="sval">conf ${md._confidence ?? 0}</span>`));

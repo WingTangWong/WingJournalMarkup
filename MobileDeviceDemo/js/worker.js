@@ -99,9 +99,13 @@ function onDetect({ seq, width, height, buffer }) {
   const src = matFromBuffer(buffer, width, height);
   const gray = grayOf(src);
   let markers = [];
-  try { markers = detector.detect(gray); }
-  finally { src.delete(); gray.delete(); }
-  post({ type: "markers", seq, markers });
+  let sharpness = null;
+  try {
+    markers = detector.detect(gray);
+    // fast live sharpness: global focus + acutance at the corner markers
+    sharpness = V.assessSharpness(cv, gray, markers, []);
+  } finally { src.delete(); gray.delete(); }
+  post({ type: "markers", seq, markers, sharpness });
 }
 
 function onAnalyze({ seq, width, height, buffer, markers }) {
@@ -117,15 +121,30 @@ function onAnalyze({ seq, width, height, buffer, markers }) {
     const { mat: normalized, width: nw, height: nh } = V.rectify(cv, src, quad);
     keep(normalized);
 
-    progress("literal regions");
     const grayN = keep(grayOf(normalized));
+
+    // markers re-found in normalized coords: block search + sharpness probes
+    const normMarkers = detector.detect(grayN);
+    const markerBoxes = normMarkers.map((m) => {
+      const xs = m.corners.map((p) => p[0]);
+      const ys = m.corners.map((p) => p[1]);
+      return [Math.min(...xs), Math.min(...ys), Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)];
+    });
+
+    progress("literal regions");
     const literals = V.detectLiteralAssets(cv, grayN);
     const forParsing = keep(normalized.clone());
     if (literals.length) V.maskLiterals(cv, forParsing, literals);
     const grayMasked = keep(grayOf(forParsing));
 
     progress("metadata block");
-    const block = V.detectMetadataBlock(cv, grayMasked);
+    const block = V.detectMetadataBlock(cv, grayMasked, 0.42, markerBoxes);
+
+    progress("sharpness");
+    const regMarks = block && block.registration_marks
+      ? block.registration_marks.map((m) => ({ center: [m[0], m[1]], size: m[2], acutance: m[3] }))
+      : [];
+    const sharpness = V.assessSharpness(cv, grayN, normMarkers, regMarks);
 
     progress("segmenting text");
     const skipTop = block ? (block.bbox[1] + block.bbox[3]) / nh : 0;
@@ -146,6 +165,7 @@ function onAnalyze({ seq, width, height, buffer, markers }) {
       metadata_block: block,
       literal_assets: literals,
       line_boxes: lineBoxes,
+      sharpness,
     };
     post(
       { type: "analyzed", seq, geometry, rectified: { buffer: rectBuf.buffer, width: nw, height: nh } },
