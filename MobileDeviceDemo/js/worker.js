@@ -209,7 +209,7 @@ function onAnalyze({ seq, frames, markers, mode }) {
     const grayMasked = keep(grayOf(forParsing));
 
     progress("metadata block");
-    const block = V.detectMetadataBlock(cv, grayMasked, 0.42, markerBoxes);
+    const block = V.detectMetadataBlock(cv, grayMasked, 0.42, markerBoxes, normMarkers);
 
     progress("sharpness");
     const regMarks = block && block.registration_marks

@@ -547,9 +547,16 @@ async function runExtraction(geometry, rect) {
   // ---- metadata cells (always report all 7 fields, in canonical order) ----
   setStatus("Reading the header…", "ok");
   const padCells = (cells, n) => (cells || []).concat(Array(n).fill(null)).slice(0, n);
-  const cells = g.metadata_block
-    ? [...padCells(g.metadata_block.row1_cells, 3), ...padCells(g.metadata_block.row2_cells, 4)]
-    : Array(7).fill(null);
+  const mb = g.metadata_block;
+  let cells;
+  if (mb && mb.field_cells) {
+    // field-anchor path: an exact field -> box map (mirrors read_metadata_block)
+    cells = METADATA_FIELDS.map((f) => mb.field_cells[f] || null);
+  } else if (mb) {
+    cells = [...padCells(mb.row1_cells, 3), ...padCells(mb.row2_cells, 4)];
+  } else {
+    cells = Array(7).fill(null);
+  }
   const rowText = [];
   const cellConf = [];
   for (let i = 0; i < 7; i++) {

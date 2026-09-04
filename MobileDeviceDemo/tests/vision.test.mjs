@@ -124,6 +124,26 @@ cv.onRuntimeInitialized = () => {
     assert.ok(block.confidence >= 0.8);
   });
 
+  t("detectMetadataBlock -> field_anchors path from ids 20-26", () => {
+    // synthetic anchors: row 1 (20,21,22) at y~40, row 2 (23-26) at y~140
+    const sq = (x, y) => [[x, y], [x + 30, y], [x + 30, y + 30], [x, y + 30]];
+    const markers = [
+      { id: 20, corners: sq(100, 40) }, { id: 21, corners: sq(400, 40) },
+      { id: 22, corners: sq(700, 40) }, { id: 23, corners: sq(100, 140) },
+      { id: 24, corners: sq(300, 140) }, { id: 25, corners: sq(500, 140) },
+      { id: 26, corners: sq(700, 140) },
+    ];
+    const block = V.detectMetadataBlock(cv, sheet, 0.42, null, markers);
+    assert.equal(block.detection, "field_anchors");
+    assert.equal(block.row1_cells.length, 3);
+    assert.equal(block.row2_cells.length, 4);
+    assert.deepEqual(Object.keys(block.field_cells).sort(), [
+      "above", "below", "document_id", "left", "page_id", "right", "topic_tags",
+    ]);
+    // document_id's box starts to the right of anchor 20 (x + 30)
+    assert.ok(block.field_cells.document_id[0] > 130);
+  });
+
   t("assessSharpness -> crisp render is not blurry; blurred one is", () => {
     const det = new V.MarkerDetector(cv);
     const marks = V.detectRegistrationMarks(cv, sheet, [0, 0, W, 260], null);

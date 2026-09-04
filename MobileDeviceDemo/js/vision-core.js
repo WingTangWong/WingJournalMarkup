@@ -22,6 +22,14 @@
   const CORNER_STICKER_ARUCO_MM = 14.0;
   const PAPERS_MM = { letter: [215.9, 279.4], a4: [210.0, 297.0], legal: [215.9, 355.6] };
 
+  // per-field metadata anchors (spec §11.3) — mirrors vision/aruco.py
+  const FIELD_BY_MARKER_ID = {
+    20: "document_id", 21: "page_id", 22: "topic_tags",
+    23: "left", 24: "above", 25: "below", 26: "right",
+  };
+  const META_ROW1 = ["document_id", "page_id", "topic_tags"];
+  const META_ROW2 = ["left", "above", "below", "right"];
+
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
@@ -438,6 +446,68 @@
     };
   }
 
+  // metadata_block._from_field_anchors (spec §11.3) — primary path. Each
+  // field's box is the span from its anchor (ids 20-26) to the next.
+  function anchorBBox(corners) {
+    const xs = corners.map((p) => p[0]);
+    const ys = corners.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  }
+
+  function metaFromFieldAnchors(markers) {
+    const anchors = {};
+    for (const m of markers || []) {
+      const name = FIELD_BY_MARKER_ID[m.id];
+      if (name) anchors[name] = anchorBBox(m.corners);
+    }
+    const names = Object.keys(anchors);
+    if (names.length < 4) return null;
+
+    const mid = (a) => (a[1] + a[3]) / 2;
+    const cys = names.map((n) => mid(anchors[n])).sort((a, b) => a - b);
+    const split = (cys[0] + cys[cys.length - 1]) / 2;
+    const rowOf = {};
+    for (const n of names) rowOf[n] = mid(anchors[n]) < split ? 0 : 1;
+
+    const xs0 = Math.min(...names.map((n) => anchors[n][0]));
+    const xs1 = Math.max(...names.map((n) => anchors[n][2]));
+    const ys0 = Math.min(...names.map((n) => anchors[n][1]));
+    const ys1 = Math.max(...names.map((n) => anchors[n][3]));
+
+    const fieldCells = {};
+    for (const [order, ridx] of [[META_ROW1, 0], [META_ROW2, 1]]) {
+      const present = order
+        .filter((n) => n in anchors && rowOf[n] === ridx)
+        .map((n) => [n, anchors[n]])
+        .sort((a, b) => a[1][0] - b[1][0]);
+      for (let i = 0; i < present.length; i++) {
+        const [name, a] = present[i];
+        const [ax0, ay0, ax1, ay1] = a;
+        const aw = ax1 - ax0;
+        const ah = ay1 - ay0;
+        const left = ax1 + 0.15 * aw;
+        const right = i + 1 < present.length
+          ? present[i + 1][1][0] - 0.15 * aw
+          : xs1 + 0.06 * (xs1 - xs0);
+        fieldCells[name] = [left, ay0 + 0.12 * ah, Math.max(1, right - left), ah];
+      }
+    }
+    if (!Object.keys(fieldCells).length) return null;
+
+    const rows = Object.values(rowOf);
+    const bothRows = rows.includes(0) && rows.includes(1);
+    return {
+      bbox: [xs0, ys0, xs1 - xs0, ys1 - ys0],
+      row_divider_y: bothRows ? (ys0 + ys1) / 2 : ys1,
+      row1_cells: META_ROW1.filter((n) => n in fieldCells).map((n) => fieldCells[n]),
+      row2_cells: META_ROW2.filter((n) => n in fieldCells).map((n) => fieldCells[n]),
+      confidence: Math.round(Math.min(0.97, 0.6 + 0.05 * names.length) * 1000) / 1000,
+      detection: "field_anchors",
+      registration_marks: [],
+      field_cells: fieldCells,
+    };
+  }
+
   // metadata_block._from_registration_marks
   function metaFromMarks(C, gray, searchFrac, markerBoxes) {
     const h = gray.rows;
@@ -476,7 +546,10 @@
    *            row2_cells:number[][], confidence:number, detection:string,
    *            registration_marks:number[][]} | null}
    */
-  function detectMetadataBlock(C, gray, searchFrac = 0.42, markerBoxes = null) {
+  function detectMetadataBlock(C, gray, searchFrac = 0.42, markerBoxes = null, markers = null) {
+    const viaAnchors = metaFromFieldAnchors(markers);
+    if (viaAnchors) return viaAnchors;
+
     const viaMarks = metaFromMarks(C, gray, searchFrac, markerBoxes);
     if (viaMarks) return viaMarks;
 
