@@ -70,6 +70,8 @@ let rawUrlBase = null;
 const tgt = {
   targets: [], ti: 0, baseGeometry: null,
   baseMarkers: {},           // id -> {center, corners} in canvas px
+  pageSize: null,            // [w, h] of the rectified canvas
+  ghosts: [],                // per target: a canvas cropped from the base
   holdStart: 0,
   results: [],               // per close-up: {ok, method, detail}
 };
@@ -299,30 +301,35 @@ function loop(ts) {
 }
 
 // ---- close-up pass (SCANNER.md phase B) ----------------------------
-// similarity transform canvas-px -> screen-px from >=2 shared markers
+// similarity transform canvas-px -> CSS-screen-px from >=2 shared markers.
+// Returns `map(pt)` and the affine coefficients `mat` (screenX = a*cx+c*cy+e,
+// screenY = b*cx+d*cy+f) so an image can be drawn straight into canvas space.
 function liveSimilarity(view) {
   const pairs = [];
   for (const m of markers) {
     const bm = tgt.baseMarkers[m.id];
     if (bm) pairs.push({ v: m.center, c: bm.center });
   }
-  if (pairs.length < 2) return { ok: false, nShared: pairs.length, map: null };
+  if (pairs.length < 2) return { ok: false, nShared: pairs.length, map: null, mat: null };
   const [p, q] = pairs;
   const cd = dist(p.c, q.c);
-  if (cd < 1) return { ok: false, nShared: pairs.length, map: null };
+  if (cd < 1) return { ok: false, nShared: pairs.length, map: null, mat: null };
   const s = dist(p.v, q.v) / cd;
   const ang = Math.atan2(q.v[1] - p.v[1], q.v[0] - p.v[0])
     - Math.atan2(q.c[1] - p.c[1], q.c[0] - p.c[0]);
   const cos = Math.cos(ang) * s;
   const sin = Math.sin(ang) * s;
-  const map = ([cx, cy]) => {
-    const dx = cx - p.c[0];
-    const dy = cy - p.c[1];
-    return intrinsicToScreen(
-      [p.v[0] + cos * dx - sin * dy, p.v[1] + sin * dx + cos * dy], view,
-    );
+  const k1 = p.v[0] - cos * p.c[0] + sin * p.c[1];
+  const k2 = p.v[1] - sin * p.c[0] - cos * p.c[1];
+  const mat = {
+    a: view.s * cos, b: view.s * sin,
+    c: -view.s * sin, d: view.s * cos,
+    e: view.s * (k1 - view.visX), f: view.s * (k2 - view.visY),
   };
-  return { ok: true, nShared: pairs.length, map };
+  const map = ([cx, cy]) => [
+    mat.a * cx + mat.c * cy + mat.e, mat.b * cx + mat.d * cy + mat.f,
+  ];
+  return { ok: true, nShared: pairs.length, map, mat };
 }
 
 const polyArea = (pts) => {
@@ -335,21 +342,36 @@ const polyArea = (pts) => {
   return Math.abs(a) / 2;
 };
 
+const rectQuad = (t) => [
+  [t[0], t[1]], [t[0] + t[2], t[1]], [t[0] + t[2], t[1] + t[3]], [t[0], t[1] + t[3]],
+];
+
+// crop each target out of the base canvas — the "ghost" the user lines up to
+// (downscaled: it's a translucent guide, not for reading)
+function buildGhosts() {
+  tgt.ghosts = tgt.targets.map((t) => {
+    const scale = Math.min(1, 640 / Math.max(1, t[2]));
+    const g = document.createElement("canvas");
+    g.width = Math.max(1, Math.round(t[2] * scale));
+    g.height = Math.max(1, Math.round(t[3] * scale));
+    g.getContext("2d").drawImage(rectCanvas, t[0], t[1], t[2], t[3], 0, 0, g.width, g.height);
+    return g;
+  });
+}
+
 function targetLoop(ts, view) {
   const fresh = performance.now() - markersAt < STALE_MS;
   const t = tgt.targets[tgt.ti];
   const sim = liveSimilarity(view);
-  const poly = sim.ok
-    ? [[t[0], t[1]], [t[0] + t[2], t[1]], [t[0] + t[2], t[1] + t[3]], [t[0], t[1] + t[3]]].map(sim.map)
-    : null;
+  const poly = sim.ok ? rectQuad(t).map(sim.map) : null;
   const fill = poly ? polyArea(poly) / (view.cssW * view.cssH) : 0;
   const ready = fresh && sim.nShared >= 2 && fill >= 0.3 && fill <= 1.6;
 
-  drawTargetOverlay(poly, ready, view);
+  drawTargetOverlay(sim, t, ready, view);
   setStatus(
     `Close-up ${tgt.ti + 1}/${tgt.targets.length} — `
-    + (sim.nShared < 2 ? "keep two markers in view"
-      : fill < 0.3 ? "move closer to the box"
+    + (sim.nShared < 2 ? "point at the page, keep two markers in view"
+      : fill < 0.3 ? "move closer — fill the red patch"
       : fill > 1.6 ? "back off a little"
       : "hold still…"),
     ready ? "ok" : "warn",
@@ -363,36 +385,114 @@ function targetLoop(ts, view) {
   }
 }
 
-function drawTargetOverlay(poly, ready, view) {
+function drawTargetOverlay(sim, t, ready, view) {
   const dpr = window.devicePixelRatio || 1;
   const W = Math.round(view.cssW * dpr);
   const H = Math.round(view.cssH * dpr);
   if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
-  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const base = () => octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  base();
   octx.clearRect(0, 0, view.cssW, view.cssH);
 
-  // every visible marker, faint
-  for (const m of markers) {
-    const pts = m.corners.map((p) => intrinsicToScreen(p, view));
+  const trace = (pts) => {
     octx.beginPath();
     pts.forEach(([x, y], i) => (i ? octx.lineTo(x, y) : octx.moveTo(x, y)));
     octx.closePath();
-    octx.strokeStyle = tgt.baseMarkers[m.id] ? "rgba(46,204,113,0.8)" : "rgba(255,255,255,0.35)";
+  };
+  const ghost = tgt.ghosts && tgt.ghosts[tgt.ti];
+
+  if (sim.ok) {
+    // the other targets, faint, where they land in view
+    tgt.targets.forEach((rt, i) => {
+      if (i === tgt.ti) return;
+      const done = tgt.results[i] && tgt.results[i].ok;
+      trace(rectQuad(rt).map(sim.map));
+      octx.fillStyle = done ? "rgba(46,204,113,0.14)" : "rgba(229,83,61,0.12)";
+      octx.fill();
+    });
+
+    // the active target: ghost of its content + a bold border
+    const q = rectQuad(t).map(sim.map);
+    trace(q);
+    octx.save();
+    octx.clip();
+    if (ghost) {
+      const m = sim.mat;
+      octx.setTransform(dpr * m.a, dpr * m.b, dpr * m.c, dpr * m.d, dpr * m.e, dpr * m.f);
+      octx.globalAlpha = 0.45;
+      octx.drawImage(ghost, 0, 0, ghost.width, ghost.height, t[0], t[1], t[2], t[3]);
+      octx.globalAlpha = 1;
+      base();
+    }
+    octx.fillStyle = ready ? "rgba(46,204,113,0.14)" : "rgba(229,83,61,0.20)";
+    octx.fill();
+    octx.restore();
+    trace(q);
+    octx.strokeStyle = ready ? "#2ecc71" : "#e5533d";
+    octx.lineWidth = 4;
+    octx.setLineDash([16, 10]);
+    octx.stroke();
+    octx.setLineDash([]);
+  } else if (ghost) {
+    // no marker lock — show what to look for, centred
+    const gw = view.cssW * 0.8;
+    const gh = gw * (ghost.height / ghost.width);
+    const gx = (view.cssW - gw) / 2;
+    const gy = (view.cssH - gh) / 2;
+    octx.globalAlpha = 0.4;
+    octx.drawImage(ghost, gx, gy, gw, gh);
+    octx.globalAlpha = 1;
+    octx.strokeStyle = "rgba(229,83,61,0.75)";
+    octx.lineWidth = 3;
+    octx.setLineDash([12, 8]);
+    octx.strokeRect(gx, gy, gw, gh);
+    octx.setLineDash([]);
+  }
+
+  // visible markers — green if they anchor the mapping, faint otherwise
+  for (const mk of markers) {
+    trace(mk.corners.map((p) => intrinsicToScreen(p, view)));
+    octx.strokeStyle = tgt.baseMarkers[mk.id] ? "rgba(46,204,113,0.85)" : "rgba(255,255,255,0.3)";
     octx.lineWidth = 2;
     octx.stroke();
   }
 
-  if (!poly) return;
-  octx.beginPath();
-  poly.forEach(([x, y], i) => (i ? octx.lineTo(x, y) : octx.moveTo(x, y)));
-  octx.closePath();
-  octx.strokeStyle = ready ? "#2ecc71" : "#f2c14e";
-  octx.lineWidth = 4;
-  octx.setLineDash([14, 10]);
-  octx.stroke();
-  octx.setLineDash([]);
-  octx.fillStyle = ready ? "rgba(46,204,113,0.15)" : "rgba(242,193,78,0.10)";
-  octx.fill();
+  drawTargetMinimap(view);
+}
+
+// a small page thumbnail, top-right: every target red (pending) / green (done),
+// the active one ringed white — so the whole-page status is always visible
+function drawTargetMinimap(view) {
+  if (!tgt.pageSize) return;
+  const [pw, ph] = tgt.pageSize;
+  const mw = Math.min(92, view.cssW * 0.24);
+  const mh = mw * (ph / pw);
+  const x = view.cssW - mw - 12;
+  const y = 66;
+  octx.save();
+  octx.globalAlpha = 0.9;
+  octx.fillStyle = "#0a0f0c";
+  octx.fillRect(x - 3, y - 3, mw + 6, mh + 6);
+  if (rectCanvas.width) octx.drawImage(rectCanvas, x, y, mw, mh);
+  octx.globalAlpha = 1;
+  tgt.targets.forEach((rt, i) => {
+    const done = tgt.results[i] && tgt.results[i].ok;
+    const rx = x + (rt[0] / pw) * mw;
+    const ry = y + (rt[1] / ph) * mh;
+    const rw = (rt[2] / pw) * mw;
+    const rh = (rt[3] / ph) * mh;
+    octx.fillStyle = done ? "rgba(46,204,113,0.5)" : "rgba(229,83,61,0.5)";
+    octx.fillRect(rx, ry, rw, rh);
+    if (i === tgt.ti) {
+      octx.strokeStyle = "#fff";
+      octx.lineWidth = 1.5;
+      octx.strokeRect(rx, ry, rw, rh);
+    }
+  });
+  octx.strokeStyle = "rgba(255,255,255,0.25)";
+  octx.lineWidth = 1;
+  octx.strokeRect(x, y, mw, mh);
+  octx.restore();
 }
 
 // ---- geometry -------------------------------------------------
@@ -609,11 +709,17 @@ function startTargetPass(geometry) {
   tgt.baseGeometry = geometry;
   tgt.baseMarkers = {};
   for (const m of geometry.base_markers_canvas || []) tgt.baseMarkers[m.id] = m;
+  tgt.pageSize = geometry.normalized
+    ? [geometry.normalized.width, geometry.normalized.height]
+    : [rectCanvas.width, rectCanvas.height];
+  buildGhosts();
   tgt.holdStart = 0;
   tgt.results = [];
   mode = "target";
   $("target-bar").hidden = false;
   $("controls").hidden = true;
+  $("roles").style.display = "none";
+  updatePips(new Set());
   markers = [];
   busy = false;
   running = true;
@@ -665,6 +771,7 @@ async function finishPass() {
   busy = true;
   $("target-bar").hidden = true;
   $("controls").hidden = false;
+  $("roles").style.display = "";
   octx.clearRect(0, 0, overlay.width, overlay.height);
   setStatus("Finishing…", "ok");
   const msg = await ask({ type: "finish" }, [], 30000);
@@ -674,6 +781,7 @@ async function finishPass() {
   geometry.close_ups = tgt.results.map((r, i) => ({
     target: tgt.targets[i], ok: r && r.ok, method: r && r.method, detail: r && r.detail,
   }));
+  tgt.ghosts = [];
   await showFinalReport(geometry, "auto");
   busy = false;
 }
@@ -1094,6 +1202,7 @@ $("btn-retake").addEventListener("click", () => {
   mode = "seek";
   $("target-bar").hidden = true;
   $("controls").hidden = false;
+  $("roles").style.display = "";
   running = true;
   busy = false;
   lockStart = 0;
@@ -1139,3 +1248,27 @@ function fatal(msg) {
 }
 
 window.addEventListener("beforeunload", stopStream);
+
+// dev-only: preview the close-up overlay with synthetic state (?debug=overlay)
+if (new URLSearchParams(location.search).get("debug") === "overlay") {
+  window.__previewTargetOverlay = async ({ baseUrl, targets, baseMarkers, pageSize, liveMarkers, ti = 0, results = [] }) => {
+    const bmp = await createImageBitmap(await (await fetch(baseUrl)).blob());
+    rectCanvas.width = pageSize[0];
+    rectCanvas.height = pageSize[1];
+    rectCanvas.getContext("2d").drawImage(bmp, 0, 0, pageSize[0], pageSize[1]);
+    mode = "target";
+    tgt.targets = targets;
+    tgt.baseMarkers = {};
+    for (const m of baseMarkers) tgt.baseMarkers[m.id] = m;
+    tgt.pageSize = pageSize;
+    tgt.ti = ti;
+    tgt.results = results;
+    buildGhosts();
+    $("roles").style.display = "none";
+    $("target-bar").hidden = false;
+    markers = liveMarkers;
+    markersAt = performance.now();
+    running = false;
+    targetLoop(performance.now(), computeView());
+  };
+}

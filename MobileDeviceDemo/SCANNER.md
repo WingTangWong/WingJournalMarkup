@@ -30,7 +30,7 @@ detail), `pass` (re-assess counter).
 | **BASE_BURST** | sample ~8 frames over ~600 ms, **no gating** | → BASE_SELECT |
 | **BASE_SELECT** | Tenengrad focus score per frame over the page region; keep the best; rectify it into `canvas`, record `pageHomography` | → PLAN_TARGETS |
 | **PLAN_TARGETS** | build the detail map on `canvas` (below); cluster into ≤ 5 rects sized to fill ~⅓–½ of a video frame at closer range | targets → TARGET_GUIDE(0); none → REVIEW |
-| **TARGET_GUIDE(i)** | draw target *i* on the live video, positioned from the currently visible anchors; coach "move closer, keep **two** markers in view". Ready when the target roughly fills the frame, ≥ 1 anchor is visible, and local focus is trending up | ready → TARGET_BURST(i); anchor lost → coach |
+| **TARGET_GUIDE(i)** | overlay target *i* positioned from the visible anchors (2-point similarity): a **translucent ghost** of that region's content from the base canvas to line up to, a bold border (red → green when ready), faint tints on the other targets, and a **page-thumbnail minimap** (top-right) with every target red = pending / green = done. Coach "move closer — fill the red patch, keep two markers in view". Ready when the target fills ≥ 30 % of the frame and ≥ 2 anchors are visible | ready → TARGET_BURST(i); anchor lost → coach |
 | **TARGET_BURST(i)** | burst as BASE_BURST | → TARGET_SELECT(i) |
 | **TARGET_SELECT(i)** | pick sharpest; register it to `canvas` (below); feathered-paste the target rect | i < last → TARGET_GUIDE(i+1); else → REASSESS |
 | **REASSESS** | rebuild the detail map on the composite | soft targets remain **and** `pass < 2` → `pass++`, TARGET_GUIDE(0) with the new list; else → REVIEW |
