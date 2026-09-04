@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
+<title>WJM Marker Glyphs</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- live camera -->
+  <video id="video" playsinline muted autoplay></video>
+
+  <!-- detection overlay, redrawn every frame -->
+  <canvas id="overlay"></canvas>
+
+  <header id="hud">
+    <div id="status" class="status">Loading the vision engine&hellip;</div>
+  </header>
+
+  <footer id="controls">
+    <button id="btn-flip" class="ctl" type="button">Flip</button>
+    <button id="btn-torch" class="ctl" type="button" hidden>Torch</button>
+  </footer>
+
+  <div id="gate" class="sheet">
+    <div class="sheet-inner">
+      <h1>WJM&nbsp;Marker&nbsp;Glyphs</h1>
+      <p>A stand-alone test bench for the bullseye + 3-bit corner-code glyph
+         (no ArUco, no ML — pure OpenCV contour analysis). Point the camera at
+         a printed or hand-drawn glyph; detected ones are outlined in green
+         with their decoded value.</p>
+      <button id="btn-start" class="primary" type="button" disabled>
+        Loading&hellip;
+      </button>
+      <p class="fine" id="gate-fine">
+        Needs camera access. Everything runs on-device &mdash; no upload.
+      </p>
+    </div>
+  </div>
+
+  <div id="fatal" class="sheet" hidden>
+    <div class="sheet-inner">
+      <h2>Can&rsquo;t start</h2>
+      <p id="fatal-msg"></p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // Ordered list of OpenCV.js builds to try. The first that loads wins.
+  window.OPENCV_URLS = [
+    "vendor/opencv.js",
+    "https://docs.opencv.org/4.x/opencv.js"
+  ];
+</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

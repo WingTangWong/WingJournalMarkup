@@ -103,6 +103,38 @@ stage-for-stage map in `MobileDeviceDemo/README.md`.
 
 ---
 
+## D3 – Marker-glyph exploration 🚧
+
+**Goal:** a hand-drawable alternative to the ArUco corner markers — a
+bullseye anchor + 3-bit corner code, detectable with plain OpenCV (no
+dictionary, no ML). A redesign of spec §11.4's hand-drawn ID-box notation:
+the always-filled corner becomes a bullseye (distortion-tolerant, and
+visually unambiguous against the 3 code-bit squares).
+
+- ✅ `WebDemoMarkers/` — stand-alone static demo (sibling to
+      `MobileDeviceDemo/`, own `vendor/opencv.js`), live camera preview,
+      OpenCV.js in a Web Worker
+- ✅ `js/glyph-detect.js`: nested-contour circularity detection for the
+      bullseye (ring → hole → center dot, the same technique
+      `vision/registration.py` / `vision-core.js` use for the concentric-
+      square registration marks, circular instead of square), `approxPolyDP`
+      for the box quad, ink-density probes at the 3 non-anchor corners.
+      Corners are read clockwise starting from whichever one sits nearest
+      the bullseye, so the UR/LR/LL reading is rotation-tolerant by
+      construction — verified in `tests/glyph-detect.test.mjs` (all 8
+      values, a 25° rotation, two glyphs in one frame)
+- ✅ Live overlay: green quad + bullseye ring, filled/hollow dots at the 3
+      code corners, decoded value (0–7) rendered on the box
+- ⬜ Validated only against synthetic (drawn-with-OpenCV) glyphs so far —
+      real hand-drawn ink (marker wobble, uneven stroke width, paper/lighting
+      noise) will need the same tolerance-tuning pass the HTR backends did;
+      no REALWORLD-SAMPLES coverage yet
+- ⬜ Mapping the decoded value back to WJM's semantic fields
+      (document_id/page_id/left/above/below/right, echoing §11.4's table) —
+      out of scope for this pass, which stops at detect + decode + visualize
+
+---
+
 ## M0 – Project scaffold ✅
 
 **Goal:** a runnable, tested Python package and a public repo.
