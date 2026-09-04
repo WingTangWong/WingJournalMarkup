@@ -29,6 +29,31 @@ const unreadable = (backend) => ({ text: UNRECOGNIZED, words: [], backend, recog
 
 const MAX_NEW_TOKENS = 32; // metadata fields are short; bounds worst-case latency
 
+// The DeiT image encoder resizes to a 384x384 SQUARE with no aspect
+// preservation (preprocessor_config.json: do_resize + a plain size, no
+// do_center_crop). A metadata-field crop is a wide, short strip (a page_id
+// box can be 6-8:1 wide:tall) — handed to the model as-is, that resize
+// vertically stretches the handwriting into scrambled noise, and the
+// autoregressive decoder then free-associates fluent, entirely fabricated
+// sentences from it (a language-model prior filling in for a garbage image
+// signal) rather than failing loudly. Letterboxing onto a square canvas
+// first — pad, don't stretch — keeps the glyphs' real proportions so the
+// encoder sees actual handwriting shapes instead of taffy.
+const SQUARE = 384;
+function letterboxSquare(canvas) {
+  const sq = document.createElement("canvas");
+  sq.width = SQUARE;
+  sq.height = SQUARE;
+  const ctx = sq.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, SQUARE, SQUARE);
+  const scale = Math.min(SQUARE / canvas.width, SQUARE / canvas.height);
+  const w = Math.max(1, Math.round(canvas.width * scale));
+  const h = Math.max(1, Math.round(canvas.height * scale));
+  ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, (SQUARE - w) / 2, (SQUARE - h) / 2, w, h);
+  return sq;
+}
+
 export class TrOCRRecognizer {
   /** @param {{transformersJs, modelsDir, wasmDir}} paths — see js/app.js's TROCR_PATHS */
   constructor(paths) {
@@ -61,8 +86,9 @@ export class TrOCRRecognizer {
     if (!this.pipe || !this.RawImage) return unreadable(this.name);
     let text = "";
     try {
-      const ctx = canvas.getContext("2d");
-      const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const squared = letterboxSquare(canvas);
+      const ctx = squared.getContext("2d");
+      const { data, width, height } = ctx.getImageData(0, 0, squared.width, squared.height);
       const img = new this.RawImage(data, width, height, 4);
       const out = await this.pipe(img, { max_new_tokens: MAX_NEW_TOKENS });
       text = ((out && out[0] && out[0].generated_text) || "").trim();
