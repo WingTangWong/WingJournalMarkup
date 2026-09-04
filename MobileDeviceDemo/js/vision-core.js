@@ -16,6 +16,11 @@
   const TARGET_LONG_PX = 1600;
   const ASPECT_RANGE = [1.15, 1.6];
 
+  // adhesive corner sticker (spec §11.2) — mirrors vision/aruco.py
+  const CORNER_STICKER_ID = 10;
+  const CORNER_STICKER_ARUCO_MM = 14.0;
+  const PAPERS_MM = { letter: [215.9, 279.4], a4: [210.0, 297.0], legal: [215.9, 355.6] };
+
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
@@ -633,6 +638,167 @@
     return out;
   }
 
+  // ===================================================================
+  //  Adhesive corner stickers — port of vision/corner_sticker.py
+  // ===================================================================
+
+  const STICKER_ROLE_BY_QUADRANT = {
+    "-1,-1": "TOP_LEFT", "1,-1": "TOP_RIGHT", "1,1": "BOTTOM_RIGHT", "-1,1": "BOTTOM_LEFT",
+  };
+
+  const markerSide = (m) => {
+    const c = m.corners;
+    return (dist(c[0], c[1]) + dist(c[1], c[2]) + dist(c[2], c[3]) + dist(c[3], c[0])) / 4;
+  };
+
+  // boundary.complete_quad_from_three
+  function completeQuadFromThree(byRole) {
+    const have = Object.keys(byRole);
+    if (have.length !== 3) return null;
+    const missing = ROLE_ORDER.find((r) => !(r in byRole));
+    const opp = {
+      TOP_LEFT: ["TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT"],
+      TOP_RIGHT: ["TOP_LEFT", "BOTTOM_RIGHT", "BOTTOM_LEFT"],
+      BOTTOM_RIGHT: ["TOP_RIGHT", "BOTTOM_LEFT", "TOP_LEFT"],
+      BOTTOM_LEFT: ["TOP_LEFT", "BOTTOM_RIGHT", "TOP_RIGHT"],
+    }[missing];
+    const [a, b, c] = opp.map((r) => byRole[r]);
+    const pts = Object.assign({}, byRole);
+    pts[missing] = [a[0] + b[0] - c[0], a[1] + b[1] - c[1]];
+    return orderPoints(ROLE_ORDER.map((r) => pts[r]));
+  }
+
+  // corner_sticker._find_bracket — wedge tip = the page corner
+  function findWedgeTip(C, gray, marker, outward) {
+    const h = gray.rows;
+    const w = gray.cols;
+    const center = marker.center;
+    const side = markerSide(marker);
+    const px = center[0] + outward[0] * side;
+    const py = center[1] + outward[1] * side;
+    const r = Math.floor(0.9 * side);
+    const x0 = Math.max(0, Math.floor(px - r));
+    const x1 = Math.min(w, Math.floor(px + r));
+    const y0 = Math.max(0, Math.floor(py - r));
+    const y1 = Math.min(h, Math.floor(py + r));
+    const fb = [center[0] + outward[0] * 1.05 * side * Math.SQRT2,
+      center[1] + outward[1] * 1.05 * side * Math.SQRT2];
+    if (x1 - x0 < 6 || y1 - y0 < 6) return [fb, false];
+
+    const roi = gray.roi(new C.Rect(x0, y0, x1 - x0, y1 - y0));
+    const ink = new C.Mat();
+    C.threshold(roi, ink, 0, 255, C.THRESH_BINARY_INV | C.THRESH_OTSU);
+    // erase the marker footprint
+    const poly = C.matFromArray(4, 1, C.CV_32SC2, marker.corners.flatMap(([x, y]) => [Math.round(x - x0), Math.round(y - y0)]));
+    const vec = new C.MatVector();
+    vec.push_back(poly);
+    C.fillPoly(ink, vec, new C.Scalar(0));
+    const data = ink.data;
+    const iw = ink.cols;
+    let bestTip = null;
+    let bestProj = -Infinity;
+    let n = 0;
+    for (let y = 0; y < ink.rows; y++) {
+      for (let x = 0; x < iw; x++) {
+        if (!data[y * iw + x]) continue;
+        n++;
+        const proj = (x + x0 - center[0]) * outward[0] + (y + y0 - center[1]) * outward[1];
+        if (proj > bestProj) { bestProj = proj; bestTip = [x + x0, y + y0]; }
+      }
+    }
+    roi.delete(); ink.delete(); poly.delete(); vec.delete();
+    if (n < Math.max(20, 0.02 * (x1 - x0) * (y1 - y0))) return [fb, false];
+    return [bestTip, true];
+  }
+
+  /**
+   * detect_corner_stickers.
+   * @param stickerMarkers  markers already filtered to CORNER_STICKER_ID
+   * @returns {{marker, outward:number[], corner_point:number[], bracket_found:bool, role:string}[]}
+   */
+  function detectCornerStickers(C, gray, stickerMarkers) {
+    if (!stickerMarkers.length) return [];
+    const cx = stickerMarkers.reduce((s, m) => s + m.center[0], 0) / stickerMarkers.length;
+    const cy = stickerMarkers.reduce((s, m) => s + m.center[1], 0) / stickerMarkers.length;
+    const out = [];
+    for (const m of stickerMarkers) {
+      let vx = m.center[0] - cx;
+      let vy = m.center[1] - cy;
+      if (Math.hypot(vx, vy) < 1e-3) {
+        const far = m.corners.reduce((a, b) =>
+          (dist(b, m.center) > dist(a, m.center) ? b : a));
+        vx = far[0] - m.center[0]; vy = far[1] - m.center[1];
+      }
+      const norm = Math.hypot(vx, vy) || 1;
+      const outward = [vx / norm, vy / norm];
+      const [tip, found] = findWedgeTip(C, gray, m, outward);
+      const role = STICKER_ROLE_BY_QUADRANT[
+        `${outward[0] >= 0 ? 1 : -1},${outward[1] >= 0 ? 1 : -1}`
+      ];
+      out.push({
+        marker: m, outward,
+        corner_point: [tip[0], tip[1]],
+        bracket_found: found,
+        role: role || null,
+      });
+    }
+    return out;
+  }
+
+  function stickerQuad(stickers) {
+    if (stickers.length >= 4) return orderPoints(stickers.slice(0, 4).map((s) => s.corner_point));
+    if (stickers.length === 3) {
+      const byRole = {};
+      for (const s of stickers) if (s.role) byRole[s.role] = s.corner_point;
+      if (Object.keys(byRole).length === 3) return completeQuadFromThree(byRole);
+    }
+    return null;
+  }
+
+  // corner_sticker.estimate_page_size
+  function estimatePageSize(stickers) {
+    if (stickers.length < 3) return null;
+    const quad = stickerQuad(stickers);
+    if (!quad) return null;
+    const scales = stickers.map((s) => markerSide(s.marker) / CORNER_STICKER_ARUCO_MM);
+    if (scales.some((v) => v < 1e-6)) return null;
+
+    let ppm;
+    if (stickers.length >= 4) {
+      const cps = stickers.map((s) => s.corner_point);
+      ppm = quad.map((q) => {
+        let bi = 0;
+        let bd = Infinity;
+        cps.forEach((cp, i) => { const d = dist(cp, q); if (d < bd) { bd = d; bi = i; } });
+        return scales[bi];
+      });
+    } else {
+      const mean = scales.reduce((a, b) => a + b, 0) / scales.length;
+      ppm = [mean, mean, mean, mean];
+    }
+    const avg = (a, b) => (a + b) / 2;
+    const [tl, tr, br, bl] = quad;
+    const wMm = avg(dist(tr, tl) / avg(ppm[0], ppm[1]), dist(br, bl) / avg(ppm[3], ppm[2]));
+    const hMm = avg(dist(bl, tl) / avg(ppm[0], ppm[3]), dist(br, tr) / avg(ppm[1], ppm[2]));
+
+    let best = null;
+    let bestErr = 1e9;
+    for (const [name, [pw, ph]] of Object.entries(PAPERS_MM)) {
+      for (const [a, b] of [[pw, ph], [ph, pw]]) {
+        const err = Math.abs(wMm - a) + Math.abs(hMm - b);
+        if (err < bestErr) { bestErr = err; best = name; }
+      }
+    }
+    const r1 = (v) => Math.round(v * 10) / 10;
+    return {
+      width_mm: r1(wMm), height_mm: r1(hMm),
+      px_per_mm: Math.round(ppm.reduce((a, b) => a + b, 0) / 4 * 1000) / 1000,
+      method: "corner_stickers",
+      best_match: bestErr < 30 ? best : null,
+      match_error_mm: r1(bestErr),
+    };
+  }
+
   // literal_box.mask_literals — blank each literal interior on an RGBA image
   function maskLiterals(C, rgbaMat, assets, fill = 255) {
     for (const a of assets) {
@@ -649,10 +815,11 @@
   }
 
   root.WJMVision = {
-    ROLE_BY_ID, ROLE_ORDER, TARGET_LONG_PX,
+    ROLE_BY_ID, ROLE_ORDER, TARGET_LONG_PX, CORNER_STICKER_ID,
     hasAruco, MarkerDetector, pageQuadFromMarkers, outputSize, rectify, dist,
     detectMetadataBlock, segmentLines, detectLiteralAssets, maskLiterals,
     detectRegistrationMarks, marksToQuad, laplacianVariance, assessSharpness, edgeAcutance,
+    detectCornerStickers, stickerQuad, estimatePageSize,
   };
 })(typeof self !== "undefined" ? self : globalThis);
 

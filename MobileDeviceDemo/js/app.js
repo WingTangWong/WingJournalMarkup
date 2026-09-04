@@ -54,6 +54,7 @@ let lockStart = 0;
 let markers = [];            // latest markers, in intrinsic (full-res) pixels
 let markersAt = 0;
 let frameSharp = null;       // {score, blurry} for the latest frame
+let fiducialMode = "sheet";  // "sheet" | "stickers"
 let recognizer = null;
 let ocrBackend = "none";
 const analyzeWaiters = new Map();
@@ -105,6 +106,7 @@ function onWorkerMessage(e) {
       }));
       markersAt = performance.now();
       frameSharp = m.sharpness || null;
+      fiducialMode = m.mode || "sheet";
       break;
     }
     case "progress":
@@ -390,7 +392,7 @@ async function capture(trigger) {
   const msg = await new Promise((resolve) => {
     analyzeWaiters.set(seqId, resolve);
     worker.postMessage(
-      { type: "analyze", seq: seqId, width: vw, height: vh, buffer: full.data.buffer, markers: capturedMarkers },
+      { type: "analyze", seq: seqId, width: vw, height: vh, buffer: full.data.buffer, markers: capturedMarkers, mode: fiducialMode },
       [full.data.buffer],
     );
     setTimeout(() => {
@@ -455,10 +457,12 @@ async function runExtraction(geometry, rect) {
 
   const capture = {
     dictionary: g.dictionary,
+    fiducial_mode: g.fiducial_mode || "printed_sheet",
     source: g.source,
     page_frame_quad: g.page_frame_quad,
     orientation: g.orientation,
     normalized: g.normalized,
+    page_size_estimate: g.page_size_estimate || null,
     detected_fiducials: g.detected_fiducials,
     metadata_block: g.metadata_block,
     sharpness: g.sharpness || null,
@@ -567,7 +571,15 @@ function capCropUrl(cnv) {
 }
 
 function buildNotes(c) {
-  const notes = [`${(c.detected_fiducials || []).length} ArUco marker(s); orientation via marker ids`];
+  const nf = (c.detected_fiducials || []).length;
+  const notes = [c.fiducial_mode === "corner_stickers"
+    ? `${nf} adhesive corner sticker(s); orientation via geometry`
+    : `${nf} ArUco marker(s); orientation via marker ids`];
+  if (c.page_size_estimate) {
+    const p = c.page_size_estimate;
+    notes.push(`page ~${Math.round(p.width_mm)}x${Math.round(p.height_mm)} mm`
+      + (p.best_match ? ` (${p.best_match})` : " (no standard match)"));
+  }
   if (c.sharpness) {
     const soft = (c.sharpness.probes || []).filter((p) => !p.sharp).map((p) => p.name);
     notes.push(
@@ -660,8 +672,18 @@ function sectionExtraction(c, error) {
   const out = [el("h3", null, "Extraction")];
   if (error) out.push(srow("error", esc(error), "err"));
   out.push(srow("markers", `${(c.detected_fiducials || []).map((f) => f.id).join(", ") || "—"}  (${esc(c.dictionary || "DICT_4X4_50")})`));
+  if (c.fiducial_mode === "corner_stickers") out.push(srow("fiducials", "adhesive corner stickers"));
   if (c.source) out.push(srow("photo", `${c.source.width}×${c.source.height}`));
   if (c.normalized) out.push(srow("rectified", `${c.normalized.width}×${c.normalized.height}`));
+  const ps = c.page_size_estimate;
+  if (ps) {
+    out.push(srow(
+      "page size (est)",
+      `${Math.round(ps.width_mm)}×${Math.round(ps.height_mm)} mm`
+      + (ps.best_match ? `  ≈ ${esc(ps.best_match)}` : "  (no standard match)")
+      + `  ±${ps.match_error_mm}`,
+    ));
+  }
   if (c.metadata_block) out.push(srow("block found via", esc(c.metadata_block.detection)));
   out.push(srow("OCR engine", esc(c.text_backend || ocrBackend)));
 

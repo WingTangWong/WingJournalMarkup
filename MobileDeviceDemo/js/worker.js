@@ -100,28 +100,56 @@ function onDetect({ seq, width, height, buffer }) {
   const gray = grayOf(src);
   let markers = [];
   let sharpness = null;
+  let mode = "sheet";
   try {
-    markers = detector.detect(gray);
-    // fast live sharpness: global focus + acutance at the corner markers
+    const all = detector.detect(gray);
+    const sheet = all.filter((m) => m.id >= 0 && m.id <= 3);
+    const stkm = all.filter((m) => m.id === V.CORNER_STICKER_ID);
+    if (stkm.length >= 3 && sheet.length < 3) {
+      // adhesive-sticker page: geometry gives the roles (spec §11.2)
+      mode = "stickers";
+      markers = V.detectCornerStickers(cv, gray, stkm).map((s) => ({
+        id: V.CORNER_STICKER_ID, role: s.role,
+        corners: s.marker.corners, center: s.marker.center,
+      }));
+    } else {
+      markers = sheet.length ? sheet : all;
+    }
     sharpness = V.assessSharpness(cv, gray, markers, []);
   } finally { src.delete(); gray.delete(); }
-  post({ type: "markers", seq, markers, sharpness });
+  post({ type: "markers", seq, markers, sharpness, mode });
 }
 
-function onAnalyze({ seq, width, height, buffer, markers }) {
+function onAnalyze({ seq, width, height, buffer, markers, mode }) {
   const progress = (stage) => post({ type: "progress", seq, stage });
   const trash = [];
   const keep = (m) => { trash.push(m); return m; };
   try {
-    const quad = V.pageQuadFromMarkers(markers || []);
-    if (!quad) return post({ type: "analyzed", seq, error: "need all four corner markers to normalize the page" });
+    const src = keep(matFromBuffer(buffer, width, height));
+    const graySrc = keep(grayOf(src));
+
+    let quad;
+    let stickerMode = mode === "stickers";
+    if (stickerMode) {
+      const stkm = detector.detect(graySrc).filter((m) => m.id === V.CORNER_STICKER_ID);
+      quad = V.stickerQuad(V.detectCornerStickers(cv, graySrc, stkm));
+    } else {
+      quad = V.pageQuadFromMarkers(markers || []);
+    }
+    if (!quad) return post({ type: "analyzed", seq, error: "need all four corner fiducials to normalize the page" });
 
     progress("rectify");
-    const src = keep(matFromBuffer(buffer, width, height));
     const { mat: normalized, width: nw, height: nh } = V.rectify(cv, src, quad);
     keep(normalized);
 
     const grayN = keep(grayOf(normalized));
+
+    // page-size estimate from the sticker scale on the de-warped page (spec §11.2)
+    let pageSize = null;
+    if (stickerMode) {
+      const nstk = detector.detect(grayN).filter((m) => m.id === V.CORNER_STICKER_ID);
+      pageSize = V.estimatePageSize(V.detectCornerStickers(cv, grayN, nstk));
+    }
 
     // markers re-found in normalized coords: block search + sharpness probes
     const normMarkers = detector.detect(grayN);
@@ -153,10 +181,12 @@ function onAnalyze({ seq, width, height, buffer, markers }) {
     const rectBuf = new Uint8ClampedArray(normalized.data);
     const geometry = {
       dictionary: "DICT_4X4_50",
+      fiducial_mode: stickerMode ? "corner_stickers" : "printed_sheet",
       source: { width, height },
       page_frame_quad: quad.map(([x, y]) => [round3(x), round3(y)]),
-      orientation: { method: "aruco_ids", degrees: 0 },
+      orientation: { method: stickerMode ? "geometry" : "aruco_ids", degrees: 0 },
       normalized: { width: nw, height: nh, target_long_px: TARGET_LONG_PX },
+      page_size_estimate: pageSize,
       detected_fiducials: (markers || []).map((m) => ({
         id: m.id, role: m.role,
         corners: m.corners.map(([x, y]) => [round3(x), round3(y)]),

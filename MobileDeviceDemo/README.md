@@ -6,9 +6,11 @@ structure** — page metadata, bullets, tags, references, contacts — as a JSON
 object with a position for every element. All of it runs on-device in
 WebAssembly; nothing is uploaded.
 
-It reads the same markers a WJM sheet is printed with (`wingjournal make-sheet`
-→ `DICT_4X4_50`, IDs `0/1/2/3` = TL/TR/BR/BL) and mirrors the CLI's extraction
-stage for stage, so a capture here matches `wingjournal ingest --parse-body`.
+It reads the markers a WJM sheet is printed with (`wingjournal make-sheet` →
+`DICT_4X4_50`, IDs `0/1/2/3` = TL/TR/BR/BL) **or** four identical adhesive
+corner stickers (`wingjournal make-stickers`, ID `10`) — with stickers it also
+guesses the physical page size. It mirrors the CLI's extraction stage for stage,
+so a capture here matches `wingjournal ingest --parse-body`.
 
 ## Try it
 
@@ -61,6 +63,8 @@ also gives you HTTPS without certs.
 
 1. Camera → hidden ≤900 px canvas; `getImageData` buffer transferred to the
    worker ~14×/s → `aruco_ArucoDetector` (`DICT_4X4_50`, sub-pixel corners).
+   Four id-`10` markers → **sticker mode**: roles from geometry + the wedge
+   direction, page corners from the wedge tips, page size from the sticker scale.
 2. Guide test on the main thread: every marker's four corners inside the guide
    rectangle, and large enough (rejects "too far").
 3. All of ids 0/1/2/3 inside, **the frame sharp enough**, and stable for 450 ms →
@@ -128,6 +132,7 @@ When an extraction stage changes there, port it here:
 | `vision/aruco.py`, `vision/boundary.py`, `vision/rectify.py` | `vision-core.js` |
 | `recognition/metadata_block.py`, `recognition/text/segment.py`, `vision/literal_box.py` | `vision-core.js` |
 | `recognition/tags.py`, `recognition/parse.py` | `wjm-parse.js` |
+| `vision/corner_sticker.py` | `vision-core.js` |
 | `recognition/text/*` (Tesseract) | `ocr.js` |
 | `pipeline.ingest_image` | `worker.js` `onAnalyze` + `app.js` `runExtraction` |
 

@@ -120,6 +120,48 @@ cv.onRuntimeInitialized = () => {
     assert.deepEqual(V.detectLiteralAssets(cv, sheet), []);
   });
 
+  t("corner stickers -> roles, quad, page-size estimate", () => {
+    // a blank page with a synthetic id-10 sticker (wedge + bracket + aruco) at
+    // each corner, rotated for its corner
+    const PW = 700, PH = 900;
+    const page = new cv.Mat(PH, PW, cv.CV_8UC1, new cv.Scalar(255));
+    const SS = 96;
+    const one = new cv.Mat(SS, SS, cv.CV_8UC1, new cv.Scalar(255));
+    // wedge (solid triangle) at TL
+    const tri = cv.matFromArray(3, 1, cv.CV_32SC2, [0, 0, 30, 0, 0, 30]);
+    const tv = new cv.MatVector(); tv.push_back(tri);
+    cv.fillPoly(one, tv, new cv.Scalar(0));
+    cv.rectangle(one, new cv.Point(0, 0), new cv.Point(46, 3), new cv.Scalar(0), -1);
+    cv.rectangle(one, new cv.Point(0, 0), new cv.Point(3, 46), new cv.Scalar(0), -1);
+    const mk = new cv.Mat();
+    (cv.aruco_generateImageMarker || cv.generateImageMarker)(dict, 10, 44, mk, 1);
+    mk.copyTo(one.roi(new cv.Rect(26, 26, 44, 44)));
+
+    const place = (rot, x, y) => {
+      const r = new cv.Mat();
+      if (rot) cv.rotate(one, r, rot); else one.copyTo(r);
+      r.copyTo(page.roi(new cv.Rect(x, y, SS, SS)));
+      r.delete();
+    };
+    place(null, 3, 3);
+    place(cv.ROTATE_90_CLOCKWISE, PW - SS - 3, 3);
+    place(cv.ROTATE_180, PW - SS - 3, PH - SS - 3);
+    place(cv.ROTATE_90_COUNTERCLOCKWISE, 3, PH - SS - 3);
+
+    const st = new V.MarkerDetector(cv).detect(page).filter((m) => m.id === V.CORNER_STICKER_ID);
+    assert.equal(st.length, 4, "sticker markers " + st.length);
+    const stickers = V.detectCornerStickers(cv, page, st);
+    assert.deepEqual(
+      new Set(stickers.map((s) => s.role)),
+      new Set(["TOP_LEFT", "TOP_RIGHT", "BOTTOM_RIGHT", "BOTTOM_LEFT"]),
+    );
+    assert.ok(V.stickerQuad(stickers) !== null);
+    const est = V.estimatePageSize(stickers);
+    assert.ok(est && est.width_mm > 0 && est.height_mm > est.width_mm);
+
+    page.delete(); one.delete(); mk.delete(); tri.delete(); tv.delete();
+  });
+
   sheet.delete();
   console.log(`\n${pass} passed`);
   process.exit(process.exitCode || 0);

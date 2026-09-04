@@ -81,6 +81,9 @@ stage-for-stage map in `MobileDeviceDemo/README.md`.
 - ✅ Ports of `vision/registration.py` + `vision/sharpness.py`: metadata block
       from the concentric-square marks, and a hard sharpness gate on auto-capture
       (spec §9.1, §11.1)
+- ✅ Port of `vision/corner_sticker.py`: **sticker mode** — four id-10 stickers
+      → roles + page quad from geometry/wedge tips, physical page-size estimate
+      shown in the report (spec §11.2)
 - ✅ `vendor/opencv.js` + `vendor/tesseract/` committed; deployed on GitHub Pages
       (`wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/`);
       `serve.py` (HTTP / HTTPS) for local / LAN; `tests/*.mjs` re-run the Python
