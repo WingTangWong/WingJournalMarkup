@@ -32,3 +32,8 @@ env/
 /wjm-writing-sheet*.png
 /wjm-legend.pdf
 /test-page.png
+
+# Real-world test photos (phone captures with actual handwriting/lighting/
+# rotation/wrinkling issues) — personal, potentially large, never committed.
+# See REALWORLD-SAMPLES/README.md.
+/REALWORLD-SAMPLES/
