@@ -8,6 +8,7 @@
 
 import { getRecognizer } from "./ocr.js";
 import { getHTR } from "./htr.js";
+import { getTrOCR } from "./trocr.js";
 
 const OPENCV_URLS = (window.OPENCV_URLS || ["vendor/opencv.js"]).map(
   (u) => new URL(u, location.href).href,
@@ -25,6 +26,13 @@ const HTR_PATHS = {
   ortJs: new URL("vendor/htr/ort.min.js", location.href).href,
   wasm: new URL("vendor/htr/ort-wasm-simd.wasm", location.href).href,
   model: new URL("vendor/htr/model_int8.onnx", location.href).href,
+};
+// TrOCR (js/trocr.js) — heavier, mixed-case, tried after the CRNN's accuracy
+// wasn't good enough. Same metadata-field-only comparison role.
+const TROCR_PATHS = {
+  transformersJs: new URL("vendor/trocr/transformers.min.js", location.href).href,
+  modelsDir: new URL("vendor/trocr/models/", location.href).href,
+  wasmDir: new URL("vendor/trocr/", location.href).href,
 };
 const ROLE_ORDER = ["TOP_LEFT", "TOP_RIGHT", "BOTTOM_RIGHT", "BOTTOM_LEFT"];
 
@@ -72,6 +80,8 @@ let recognizer = null;
 let ocrBackend = "none";
 let htr = null;              // HTRRecognizer, once loaded — metadata fields only
 let htrBackend = "none";
+let trocr = null;            // TrOCRRecognizer, once loaded — metadata fields only
+let trocrBackend = "none";
 const waiters = new Map();   // seq -> resolve, for analyze/composite/finish replies
 
 // ---- close-up pass state (SCANNER.md phase B) -----------------------
@@ -113,6 +123,14 @@ const objectUrls = [];
   getHTR(HTR_PATHS).then((rec) => {
     htr = rec;
     htrBackend = rec ? rec.name : "none";
+  });
+
+  // ~90 MB, autoregressive decoding — slow to load and slow per field, so
+  // this warms up in the background and is used opportunistically: whatever
+  // capture happens to land after it's ready gets a trocr reading too.
+  getTrOCR(TROCR_PATHS).then((rec) => {
+    trocr = rec;
+    trocrBackend = rec ? rec.name : "none";
   });
 })();
 
@@ -940,6 +958,7 @@ async function runExtraction(geometry, rect) {
   const rowText = [];
   const cellConf = [];
   for (let i = 0; i < 7; i++) {
+    setStatus(`Reading the header — ${METADATA_FIELDS[i]}…`, "ok");
     const r = await region(cells[i]);
     let text = "";
     let confidence = 0;
@@ -962,9 +981,21 @@ async function runExtraction(geometry, rect) {
         }
       } catch (e) { /* HTR is best-effort */ }
     }
+    // TrOCR — same crop (`work` untouched since the calls above only read it),
+    // heavier and slower, tried after the CRNN's accuracy proved too weak
+    let trocrResult = null;
+    if (trocr && cells[i]) {
+      try {
+        setStatus(`Reading ${METADATA_FIELDS[i]} — TrOCR (slow, ~5-10s)…`, "ok");
+        const tr = await trocr.recognize(work);
+        if (tr.recognized) {
+          trocrResult = { text: tr.text, confidence: tr.words[0] ? tr.words[0].confidence : null };
+        }
+      } catch (e) { /* TrOCR is best-effort */ }
+    }
     capture._debug.metadata_cells.push({
       field: METADATA_FIELDS[i], bbox: cells[i], text, confidence,
-      recognized: !!r.recognized, cropUrl: r.cropUrl, htr: htrResult,
+      recognized: !!r.recognized, cropUrl: r.cropUrl, htr: htrResult, trocr: trocrResult,
     });
   }
   capture.page_metadata = Object.assign(
@@ -1153,6 +1184,9 @@ function sectionExtraction(c, error) {
   if (htrBackend === "htr") {
     out.push(srow("+ handwriting model", "CRNN+CTC (metadata fields, caps-only) — see crops below", "muted"));
   }
+  if (trocrBackend === "trocr") {
+    out.push(srow("+ handwriting model", "TrOCR (metadata fields, mixed case) — see crops below", "muted"));
+  }
 
   const s = c.sharpness;
   if (s) {
@@ -1203,9 +1237,14 @@ function sectionMetadataCrops(c) {
     cropUrl: cell.cropUrl,
     read: cell.bbox ? (cell.recognized ? cell.text : "(nothing read)") : "(cell not found)",
     readEmpty: !cell.recognized,
-    extra: cell.htr
-      ? `HTR: "${cell.htr.text}"  (${Math.round((cell.htr.confidence || 0) * 100)}%, caps-only model)`
-      : (htrBackend === "htr" && cell.bbox ? "HTR: (nothing read)" : null),
+    extra: [
+      cell.htr
+        ? `HTR (CRNN): "${cell.htr.text}"  (${Math.round((cell.htr.confidence || 0) * 100)}%, caps-only model)`
+        : (htrBackend === "htr" && cell.bbox ? "HTR (CRNN): (nothing read)" : null),
+      cell.trocr
+        ? `HTR (TrOCR): "${cell.trocr.text}"`
+        : (trocrBackend === "trocr" && cell.bbox ? "HTR (TrOCR): (nothing read)" : null),
+    ],
   }));
   return out;
 }
@@ -1248,7 +1287,9 @@ function cropCard({ label, badge, badgeCls, cropUrl, read, readEmpty, extra }) {
     card.appendChild(img);
   }
   card.appendChild(el("div", "read" + (readEmpty ? " empty" : ""), esc(read)));
-  if (extra) card.appendChild(el("div", "read muted", esc(extra)));
+  for (const line of [].concat(extra || [])) {
+    if (line) card.appendChild(el("div", "read muted", esc(line)));
+  }
   return card;
 }
 

@@ -17,9 +17,11 @@ so a capture here matches `wingjournal ingest --parse-body`.
 **<https://wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/>** — open
 it on a phone, tap **Start camera**, hold a printed WJM sheet in the frame.
 
-`vendor/opencv.js`, `vendor/tesseract/`, and `vendor/htr/` (the WASM engines,
-~30 MB total) are committed, so the whole demo serves from the repo / GitHub
-Pages with no external calls.
+`vendor/opencv.js`, `vendor/tesseract/`, `vendor/htr/`, and `vendor/trocr/`
+(the WASM engines + models, **~105 MB total** — `vendor/trocr/` alone is
+~77 MB) are committed, so the whole demo serves from the repo / GitHub Pages
+with no external calls. That's a real clone-size cost; see
+[Handwriting recognition](#handwriting-recognition-experimental) for why.
 
 ## Run locally
 
@@ -31,7 +33,7 @@ python3 serve.py           # http://localhost:8000
 Open it in a desktop browser and hold a printed WJM sheet (or
 `samples/wjm-writing-sheet-letter.png` on another screen) up to the webcam.
 `./fetch-opencv.sh [version]` refreshes the vendored OpenCV.js;
-`./fetch-htr.sh` refreshes the handwriting-model assets.
+`./fetch-htr.sh` / `./fetch-trocr.sh` refresh the handwriting-model assets.
 
 ### Serving it yourself over the LAN
 
@@ -58,6 +60,7 @@ also gives you HTTPS without certs.
 | **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; `analyze` picks the sharpest burst frame (Tenengrad), rectifies to a fixed 2550×3300 canvas, runs the recognition geometry, plans close-up targets, and keeps the canvas in a session; `composite` registers + feather-pastes each close-up (ArUco anchor homography, then AKAZE/ORB restricted to text landmarks — all rotation-tolerant, so the phone can be turned any way); `finish` re-recognises the composite. Keeps the 11 MB compile and all pixel work off the UI thread. |
 | **Tesseract.js** (its own worker, spawned from the main thread) | OCR of the metadata cells and each body line off the rectified page. |
 | **`js/htr.js`** (main thread, `onnxruntime-web` WASM) | A small CRNN+CTC handwriting model, run alongside Tesseract on metadata cells only — see [Handwriting recognition](#handwriting-recognition-experimental). |
+| **`js/trocr.js`** (main thread, Transformers.js) | TrOCR, a heavier transformer OCR model, run alongside the other two on metadata cells — same section. |
 | **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR (+ HTR on metadata) → parse. |
 | **`js/wjm-parse.js`** | The WJM grammar + element parser (bullets, tags, temporal, references, contacts). Pure text, no dependencies. |
 
@@ -146,31 +149,50 @@ be rebuilt from it (planned).
 ### Handwriting recognition (experimental)
 
 Tesseract.js is an LSTM trained mostly on printed fonts — weak on cursive by
-its own project description. `js/htr.js` adds a small **CRNN+CTC** model
-trained on real handwriting (the IAM database) as a second opinion, run
-through `onnxruntime-web` (WASM):
+its own project description. Two more backends run alongside it on the seven
+metadata cells (never on body lines), each showing up as its own line under
+the crop in the report. Nothing is auto-selected between any of the three —
+you read all of them and judge.
 
-- ~1 MB, int8-quantized, ~50ms/field on CPU after a one-time ~200ms model load;
-- fixed 256×48 input, **one word or short phrase per call** — a good match for
-  this project's metadata fields, not for full body sentences;
-- **42-symbol charset: digits, `A–Z`, `Ä Ö Ü`, `'`/`-` — uppercase only**, no
-  lowercase or other punctuation. That's the model, not a bug.
+**`js/htr.js` — small CRNN+CTC** (`onnxruntime-web`, WASM):
+- ~1 MB, int8-quantized, ~50ms/field after a one-time ~200ms model load;
+- fixed 256×48 input, one word/short phrase per call;
+- **42-symbol charset, uppercase only** (digits, `A–Z`, `Ä Ö Ü`, `'`/`-`).
+- In practice its accuracy on real handwriting was poor enough to not be very
+  useful — kept in as the cheap/fast option, see TrOCR below for the one
+  actually worth reading.
 
-It runs automatically alongside Tesseract on the seven metadata cells only
-(never on body lines) and shows up as a second **HTR:** line under each crop
-in the report — nothing is auto-selected between the two; you read both and
-judge. If the ~12 MB of model+runtime fails to load or is slow, the rest of
-the demo is unaffected — Tesseract's reading is always still there.
+**`js/trocr.js` — TrOCR**, a proper ViT-encoder + transformer-decoder OCR
+model (Li et al., [arXiv:2109.10282](https://arxiv.org/abs/2109.10282)),
+via [Transformers.js](https://github.com/xenova/transformers.js) (bundles a
+matching `onnxruntime-web`):
+- **~65 MB** of int8-quantized ONNX weights + ~11 MB runtime (~76 MB total);
+- reads **mixed case**, no fixed charset — noticeably more accurate than the
+  CRNN on real handwriting in testing;
+- **slow**: autoregressive decoding, roughly **5–10 seconds per field** on
+  CPU/WASM (~1–2 minutes added to a capture if it runs on all seven fields) —
+  the status line names which field it's on so a long wait doesn't look
+  hung. Output is capped at 32 generated tokens.
+- Loads in the background at page start; if it isn't ready yet when you
+  capture, that capture just doesn't get a TrOCR line — nothing waits on it.
 
-**Provenance / license — read before reusing this outside a hobby project.**
-The model is Harald Scheidl's browser HTR demo
+If either backend's assets fail to load or are still loading, the rest of the
+demo is unaffected — Tesseract's reading is always there regardless.
+
+**Provenance / license — read before reusing either outside a hobby project.**
+Both are fine-tuned on the **IAM Handwriting Database (CC BY-NC-SA 4.0 —
+non-commercial)**, and neither the CRNN's author nor Microsoft's TrOCR release
+states an explicit redistribution license for the checkpoint itself (TrOCR's
+*code*, in `microsoft/unilm`, is MIT — that doesn't extend to weights trained
+on NC-licensed data). CRNN: Harald Scheidl's browser HTR demo
 ([writeup](https://githubharald.github.io/text_reader.html),
-[HTRPipeline](https://github.com/githubharald/HTRPipeline)), trained on the
-**IAM Handwriting Database (CC BY-NC-SA 4.0 — non-commercial)**. No explicit
-redistribution license is stated by the author beyond the public demo itself.
-It's vendored here with attribution, on the understanding that this stays a
-non-commercial research/hobby inclusion — see the header of `js/htr.js` before
-changing or re-vendoring it.
+[HTRPipeline](https://github.com/githubharald/HTRPipeline)). TrOCR:
+[microsoft/trocr-small-handwritten](https://huggingface.co/microsoft/trocr-small-handwritten),
+ONNX conversion by
+[Xenova/trocr-small-handwritten](https://huggingface.co/Xenova/trocr-small-handwritten).
+Both are vendored with attribution on the same understanding: this stays a
+non-commercial research/hobby inclusion — see the headers of `js/htr.js` and
+`js/trocr.js` before changing or re-vendoring either.
 
 ## Development workflow
 
@@ -209,10 +231,12 @@ js/vision-core.js      MarkerDetector, page quad, rectify, metadata block, segme
 js/wjm-parse.js        WJM grammar + element parser (pure text)
 js/ocr.js              Tesseract.js wrapper + null fallback
 js/htr.js              CRNN+CTC handwriting model wrapper (onnxruntime-web)
+js/trocr.js            TrOCR handwriting model wrapper (Transformers.js)
 serve.py               stdlib static server (HTTP, or HTTPS with --cert/--key)
 fetch-opencv.sh        refresh vendor/opencv.js
-fetch-htr.sh           refresh vendor/htr/ (onnxruntime-web + the model)
-vendor/                opencv.js + tesseract/ + htr/ (committed WASM engines)
+fetch-htr.sh           refresh vendor/htr/ (onnxruntime-web + the CRNN model)
+fetch-trocr.sh         refresh vendor/trocr/ (Transformers.js + the TrOCR model)
+vendor/                opencv.js + tesseract/ + htr/ + trocr/ (committed WASM engines)
 tests/                 parse.test.mjs, vision.test.mjs  (node)
 ```
 
@@ -220,9 +244,10 @@ tests/                 parse.test.mjs, vision.test.mjs  (node)
 
 Local demo — no batching, persistence, or upload; the JSON is yours to feed into
 the CLI / store. Handwriting OCR is weak (Tesseract, same as the CLI's first
-pass); machine-printed text reads well. The CRNN+CTC model
-([above](#handwriting-recognition-experimental)) does better on genuine
-cursive/print handwriting but only reads short, uppercase text, only on
-metadata fields, and carries a non-commercial-leaning license — read its
-section before relying on it for anything beyond this demo. Extraction quality
+pass); machine-printed text reads well. Two handwriting-specific models
+([above](#handwriting-recognition-experimental)) help on metadata fields only:
+the CRNN is fast but reads short uppercase-only text and, in testing, wasn't
+very accurate; TrOCR reads mixed case and is noticeably better but costs
+5-10 seconds per field. Both carry a non-commercial-leaning license — read
+that section before relying on either for anything beyond this demo. Extraction quality
 tracks lighting and how flat the page is held.

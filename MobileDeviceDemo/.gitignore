@@ -4,6 +4,7 @@ vendor/*
 !vendor/opencv.js
 !vendor/tesseract/
 !vendor/htr/
+!vendor/trocr/
 
 # Throwaway TLS certs for on-device testing
 *.pem
