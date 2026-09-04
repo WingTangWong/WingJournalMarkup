@@ -365,23 +365,30 @@ function targetLoop(ts, view) {
   const sim = liveSimilarity(view);
   const poly = sim.ok ? rectQuad(t).map(sim.map) : null;
   const fill = poly ? polyArea(poly) / (view.cssW * view.cssH) : 0;
-  const ready = fresh && sim.nShared >= 2 && fill >= 0.3 && fill <= 1.6;
+  // this is a *hint*, not a gate: live 2-marker lock at close range is
+  // unreliable (autofocus hunting, a marker sliding out of frame), so it only
+  // drives the ring/auto-fire bonus — the shutter button below always works,
+  // and the worker registers whatever framing the burst actually got
+  const ready = fresh && sim.nShared >= 2 && fill >= 0.22 && fill <= 2.2;
 
   drawTargetOverlay(sim, t, ready, view);
   setStatus(
     `Close-up ${tgt.ti + 1}/${tgt.targets.length} — `
-    + (sim.nShared < 2 ? "point at the page, keep two markers in view"
-      : fill < 0.3 ? "move closer — fill the red patch"
-      : fill > 1.6 ? "back off a little"
-      : "hold still…"),
+    + (sim.nShared < 2 ? "line up the ghost, then tap the shutter"
+      : fill < 0.22 ? "move closer, or tap the shutter when ready"
+      : fill > 2.2 ? "back off a touch, or tap the shutter"
+      : "hold still — capturing…"),
     ready ? "ok" : "warn",
   );
 
   if (ready && !busy) {
     if (!tgt.holdStart) tgt.holdStart = ts;
-    else if (ts - tgt.holdStart > 350) captureCloseup();
+    const held = ts - tgt.holdStart;
+    setLockRing(Math.min(1, held / 300));
+    if (held > 300) captureCloseup();
   } else {
     tgt.holdStart = 0;
+    setLockRing(0);
   }
 }
 
@@ -730,6 +737,7 @@ async function captureCloseup() {
   if (busy) return;
   busy = true;
   running = false;
+  setLockRing(0);
   navigator.vibrate?.(20);
   fireFlash();
   const i = tgt.ti;
@@ -1212,9 +1220,15 @@ $("btn-retake").addEventListener("click", () => {
 });
 
 $("btn-shutter").addEventListener("click", () => {
-  if (busy) return;
-  if (mode === "target") captureCloseup();
-  else if (running) capture("manual");
+  if (!busy && running && mode === "seek") capture("manual");
+});
+
+// close-up capture is manual-first: live auto-lock is a bonus when it lands,
+// but the button always works — the worker registers whatever framing it gets
+// (anchor homography if it can, ORB otherwise), so there's no need to wait for
+// a perfect "ready" state
+$("btn-target-shutter").addEventListener("click", () => {
+  if (mode === "target" && !busy) captureCloseup();
 });
 
 $("btn-skip-target").addEventListener("click", () => {

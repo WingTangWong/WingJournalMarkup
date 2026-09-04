@@ -77,10 +77,12 @@ See [`SCANNER.md`](SCANNER.md) for the full state machine. **Phases A + B**:
 5. **Close-up pass** (auto only): for each target the overlay shows a
    **translucent ghost** of that region (from the base) to line up to, a
    red→green border, and a **minimap** (top-right) with every target red
-   (pending) / green (done) — *fill the red patch, keep two markers in view*. On
-   a steady framing it bursts again; the worker registers the close-up
-   (`anchorHomography` from ≥2 shared ArUco ids, `orbHomography` fallback) and
-   feather-composites it. **Skip this** / **Use what I have** end the pass early.
+   (pending) / green (done). **Manual-first** — a dedicated shutter button fires
+   the close-up burst on tap, any time; a steady 2-marker lock also auto-fires
+   after 300 ms as a bonus, but isn't required. Either way the worker registers
+   whatever framing the burst got (`anchorHomography` from ≥2 shared ArUco ids,
+   `orbHomography` fallback) and feather-composites it. **Skip this** / **Use
+   what I have** end the pass early.
 6. `finish` recognises the composited canvas; the main thread OCRs each cell and
    line, runs `wjm-parse`, assembles the record. The review screen lists which
    close-ups composited and how.
