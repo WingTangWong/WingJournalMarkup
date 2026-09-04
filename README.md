@@ -19,6 +19,9 @@ This repository is the **CLI edition**: Python + OpenCV, command-line only for n
 - Mobile capture demo — camera → auto-shoot when 4 markers are framed → rectified
   page, all on-device (OpenCV.js / WASM): [`MobileDeviceDemo/`](MobileDeviceDemo/)
   · [**live**](https://wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/)
+- Marker-glyph demo — live camera detection of a hand-drawable bullseye +
+  3-bit corner-code marker, pure OpenCV: [`WebDemoMarkers/`](WebDemoMarkers/)
+  · [**live**](https://wingtangwong.github.io/WingJournalMarkup/WebDemoMarkers/)
 
 ## Status
 
