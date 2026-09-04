@@ -105,13 +105,30 @@ shades regions that never received a close-up.
 
 ## Build phases
 
-- **A — base only.** BOOT → SEEK_LOCK → BASE_BURST → BASE_SELECT → REVIEW →
-  EXTRACT. Best-of-burst single shot, INTER_AREA warp, no gate. Already better
-  than today; removes the reject loop.
-- **B — close-ups.** Add PLAN_TARGETS + the TARGET_* loop + anchor/ORB
-  registration + feathered compositing.
-- **C — convergence.** Add REASSESS with `pass < 2` cap and the "still soft"
-  review shading.
+- **A — base only.** ✅ BOOT → SEEK_LOCK → BASE_BURST → BASE_SELECT → REVIEW →
+  EXTRACT. Best-of-burst single shot, INTER_AREA/LINEAR warp, no gate.
+- **B — close-ups.** ✅ PLAN_TARGETS (metadata block + literals + paragraph-ish
+  line clusters, ≤5) + the TARGET_* loop (live similarity-mapped target box,
+  "keep two markers in view") + registration (`anchorHomography` from ≥2 shared
+  ArUco ids, `orbHomography` fallback, both sanity-checked) + feathered
+  `compositeInto` + a `finish` pass that recognises the composited canvas.
+  Worker holds the canvas in a session across `analyze` → `composite`× →
+  `finish`.
+- **C — convergence.** ⬜ REASSESS with `pass < 2` cap and "still soft" review
+  shading.
+
+### Phase B — still to tune
+
+- Target planning is structural ("box clues"), not yet a real blur/detail grid
+  — a soft body paragraph with no literal box and no anchors nearby may be
+  missed or, if picked, only reachable by ORB.
+- The live target box uses a 2-point **similarity** transform (translation +
+  scale + rotation), not a full homography, so under strong perspective it's
+  approximate — the actual `composite` registration is a full homography.
+- No exposure/white-balance matching between base and close-ups; visible seams
+  are possible.
+- Sticker / markers-only pages: close-ups fall to ORB-only (their fiducials have
+  no known canvas coordinates).
 
 ## Deferred
 

@@ -54,33 +54,38 @@ also gives you HTTPS without certs.
 
 | Where | What |
 |---|---|
-| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; on capture: pick the sharpest frame of the burst (Tenengrad) → rectify to a fixed 2550×3300 (8.5×11 @ 300 DPI) canvas → literal-region detect + mask → metadata-block detect → sharpness (informational) → text-line segmentation. Keeps the 11 MB compile and all pixel work off the UI thread. |
+| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; `analyze` picks the sharpest burst frame (Tenengrad), rectifies to a fixed 2550×3300 canvas, runs the recognition geometry, plans close-up targets, and keeps the canvas in a session; `composite` registers + feather-pastes each close-up (anchor / ORB homography); `finish` re-recognises the composite. Keeps the 11 MB compile and all pixel work off the UI thread. |
 | **Tesseract.js** (its own worker, spawned from the main thread) | OCR of the metadata cells and each body line off the rectified page. |
 | **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR → parse. |
 | **`js/wjm-parse.js`** | The WJM grammar + element parser (bullets, tags, temporal, references, contacts). Pure text, no dependencies. |
 
 ### The capture flow
 
-See [`SCANNER.md`](SCANNER.md) for the full state machine. **Phase A** (current):
+See [`SCANNER.md`](SCANNER.md) for the full state machine. **Phases A + B**:
 
 1. On start, the track is pushed to the sensor's max resolution + continuous
    autofocus (`applyConstraints`; Safari/iOS has no `ImageCapture.takePhoto()`).
 2. Camera → hidden ≤900 px canvas → worker ~14×/s → `aruco_ArucoDetector`
    (`DICT_4X4_50`). Three-plus id-`10` markers → **sticker mode**.
-3. Guide test on the main thread: every marker's corners inside the guide, large
-   enough. Guide brackets go **red → orange → yellow → green** as the lock firms.
-4. All four corner ids in the guide, stable for 450 ms → **burst** of 6 frames
-   over 500 ms handed to the worker. **No sharpness gate** — auto-capture fires
-   on the lock alone (toggle **Auto** off for manual).
-5. Worker scores each burst frame (Tenengrad), keeps the sharpest, rectifies it
-   into the fixed 2550×3300 canvas (INTER_AREA when shrinking, LINEAR near 1:1 —
-   never CUBIC), and returns the page + metadata grid + body-line boxes. The
-   review screen reports the focus score; nothing is rejected.
-6. Main thread OCRs each cell and line, runs `wjm-parse`, assembles the record.
+3. Guide test: every corner marker inside the guide, large enough. Brackets go
+   **red → orange → yellow → green** as the lock firms.
+4. Four corner ids in the guide, stable 450 ms → **base burst** of 6 frames.
+   No sharpness gate. The worker keeps the sharpest (Tenengrad), rectifies it
+   into a fixed 2550×3300 canvas (INTER_AREA/LINEAR, never CUBIC), and **plans
+   up to 5 close-up targets** (metadata block, literal regions, text-line
+   clusters).
+5. **Close-up pass** (auto only): for each target the overlay shows a dashed box
+   positioned from the visible markers — *keep two markers in view, move
+   closer*. On a steady framing it bursts again; the worker registers the
+   close-up (`anchorHomography` from ≥2 shared ArUco ids, `orbHomography`
+   fallback) and feather-composites it into the canvas. **Skip this** /
+   **Use what I have** end the pass early.
+6. `finish` recognises the composited canvas; the main thread OCRs each cell and
+   line, runs `wjm-parse`, assembles the record. The review screen lists which
+   close-ups composited and how.
 
-**Not yet built (phases B/C):** close-up re-shots of soft detail areas composited
-into the canvas, and a re-assess loop. Until then the base is one video frame and
-detail is limited — the review screen says so.
+**Not yet built (phase C):** a re-assess loop that re-plans targets on the
+composite and offers another pass.
 
 ### The captured report
 

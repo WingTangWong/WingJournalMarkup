@@ -61,7 +61,18 @@ let markersAt = 0;
 let fiducialMode = "sheet";  // "sheet" | "stickers"
 let recognizer = null;
 let ocrBackend = "none";
-const analyzeWaiters = new Map();
+const waiters = new Map();   // seq -> resolve, for analyze/composite/finish replies
+
+// ---- close-up pass state (SCANNER.md phase B) -----------------------
+let mode = "seek";           // "seek" | "target"
+let captureStamp = null;
+let rawUrlBase = null;
+const tgt = {
+  targets: [], ti: 0, baseGeometry: null,
+  baseMarkers: {},           // id -> {center, corners} in canvas px
+  holdStart: 0,
+  results: [],               // per close-up: {ok, method, detail}
+};
 
 const procCanvas = document.createElement("canvas");
 const procCtx = procCanvas.getContext("2d", { willReadFrequently: true });
@@ -113,14 +124,27 @@ function onWorkerMessage(e) {
       break;
     }
     case "progress":
-      if (busy) setStatus(`Analyzing — ${m.stage}…`, "ok");
+      if (busy) setStatus(`${m.stage}…`, "ok");
       break;
-    case "analyzed": {
-      const w = analyzeWaiters.get(m.seq);
-      if (w) { analyzeWaiters.delete(m.seq); w(m); }
+    case "analyzed":
+    case "composited": {
+      const w = waiters.get(m.seq);
+      if (w) { waiters.delete(m.seq); w(m); }
       break;
     }
   }
+}
+
+// send a message to the worker and await its keyed reply
+function ask(msg, transfer, timeoutMs = 25000) {
+  const seqId = ++seq;
+  return new Promise((resolve) => {
+    waiters.set(seqId, resolve);
+    worker.postMessage({ ...msg, seq: seqId }, transfer || []);
+    setTimeout(() => {
+      if (waiters.has(seqId)) { waiters.delete(seqId); resolve({ error: "worker timed out" }); }
+    }, timeoutMs);
+  });
 }
 
 // ---- camera -----------------------------------------------------
@@ -151,7 +175,11 @@ async function start() {
     setupTorchButton();
     $("gate").hidden = true;
     $("result").hidden = true;
+    $("target-bar").hidden = true;
+    $("controls").hidden = false;
+    mode = "seek";
     running = true;
+    busy = false;
     lockStart = 0;
     markers = [];
     requestAnimationFrame(loop);
@@ -234,6 +262,9 @@ function loop(ts) {
   }
 
   const view = computeView();
+
+  if (mode === "target") { targetLoop(ts, view); return; }
+
   const guide = computeGuide(view.cssW, view.cssH);
   const gi = screenRectToIntrinsic(guide, view);
 
@@ -265,6 +296,103 @@ function loop(ts) {
   updateStatus(assessed, goodRoles);
 
   if (lockStart && held >= HOLD_MS && !busy) capture("auto");
+}
+
+// ---- close-up pass (SCANNER.md phase B) ----------------------------
+// similarity transform canvas-px -> screen-px from >=2 shared markers
+function liveSimilarity(view) {
+  const pairs = [];
+  for (const m of markers) {
+    const bm = tgt.baseMarkers[m.id];
+    if (bm) pairs.push({ v: m.center, c: bm.center });
+  }
+  if (pairs.length < 2) return { ok: false, nShared: pairs.length, map: null };
+  const [p, q] = pairs;
+  const cd = dist(p.c, q.c);
+  if (cd < 1) return { ok: false, nShared: pairs.length, map: null };
+  const s = dist(p.v, q.v) / cd;
+  const ang = Math.atan2(q.v[1] - p.v[1], q.v[0] - p.v[0])
+    - Math.atan2(q.c[1] - p.c[1], q.c[0] - p.c[0]);
+  const cos = Math.cos(ang) * s;
+  const sin = Math.sin(ang) * s;
+  const map = ([cx, cy]) => {
+    const dx = cx - p.c[0];
+    const dy = cy - p.c[1];
+    return intrinsicToScreen(
+      [p.v[0] + cos * dx - sin * dy, p.v[1] + sin * dx + cos * dy], view,
+    );
+  };
+  return { ok: true, nShared: pairs.length, map };
+}
+
+const polyArea = (pts) => {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % pts.length];
+    a += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(a) / 2;
+};
+
+function targetLoop(ts, view) {
+  const fresh = performance.now() - markersAt < STALE_MS;
+  const t = tgt.targets[tgt.ti];
+  const sim = liveSimilarity(view);
+  const poly = sim.ok
+    ? [[t[0], t[1]], [t[0] + t[2], t[1]], [t[0] + t[2], t[1] + t[3]], [t[0], t[1] + t[3]]].map(sim.map)
+    : null;
+  const fill = poly ? polyArea(poly) / (view.cssW * view.cssH) : 0;
+  const ready = fresh && sim.nShared >= 2 && fill >= 0.3 && fill <= 1.6;
+
+  drawTargetOverlay(poly, ready, view);
+  setStatus(
+    `Close-up ${tgt.ti + 1}/${tgt.targets.length} — `
+    + (sim.nShared < 2 ? "keep two markers in view"
+      : fill < 0.3 ? "move closer to the box"
+      : fill > 1.6 ? "back off a little"
+      : "hold still…"),
+    ready ? "ok" : "warn",
+  );
+
+  if (ready && !busy) {
+    if (!tgt.holdStart) tgt.holdStart = ts;
+    else if (ts - tgt.holdStart > 350) captureCloseup();
+  } else {
+    tgt.holdStart = 0;
+  }
+}
+
+function drawTargetOverlay(poly, ready, view) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(view.cssW * dpr);
+  const H = Math.round(view.cssH * dpr);
+  if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  octx.clearRect(0, 0, view.cssW, view.cssH);
+
+  // every visible marker, faint
+  for (const m of markers) {
+    const pts = m.corners.map((p) => intrinsicToScreen(p, view));
+    octx.beginPath();
+    pts.forEach(([x, y], i) => (i ? octx.lineTo(x, y) : octx.moveTo(x, y)));
+    octx.closePath();
+    octx.strokeStyle = tgt.baseMarkers[m.id] ? "rgba(46,204,113,0.8)" : "rgba(255,255,255,0.35)";
+    octx.lineWidth = 2;
+    octx.stroke();
+  }
+
+  if (!poly) return;
+  octx.beginPath();
+  poly.forEach(([x, y], i) => (i ? octx.lineTo(x, y) : octx.moveTo(x, y)));
+  octx.closePath();
+  octx.strokeStyle = ready ? "#2ecc71" : "#f2c14e";
+  octx.lineWidth = 4;
+  octx.setLineDash([14, 10]);
+  octx.stroke();
+  octx.setLineDash([]);
+  octx.fillStyle = ready ? "rgba(46,204,113,0.15)" : "rgba(242,193,78,0.10)";
+  octx.fill();
 }
 
 // ---- geometry -------------------------------------------------
@@ -398,94 +526,190 @@ function setStatus(text, cls = "") {
 }
 
 // ---- capture ------------------------------------------------
+function fireFlash() {
+  const flash = $("flash");
+  flash.classList.remove("fire");
+  void flash.offsetWidth;
+  flash.classList.add("fire");
+}
+
+function paintRect(r) {
+  rectCanvas.width = r.width;
+  rectCanvas.height = r.height;
+  rectCanvas.getContext("2d").putImageData(
+    new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0,
+  );
+}
+
+// grab BURST_N frames over BURST_SPAN_MS from the live video
+async function grabBurst() {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  grabCanvas.width = vw;
+  grabCanvas.height = vh;
+  const g = grabCanvas.getContext("2d", { willReadFrequently: true });
+  const frames = [];
+  for (let i = 0; i < BURST_N; i++) {
+    g.drawImage(video, 0, 0, vw, vh);
+    frames.push(g.getImageData(0, 0, vw, vh));
+    if (i < BURST_N - 1) await sleep(BURST_SPAN_MS / BURST_N);
+  }
+  return { frames, vw, vh, g };
+}
+
+const framePayload = (frames) => ({
+  frames: frames.map((f) => ({ buffer: f.data.buffer, width: f.width, height: f.height })),
+  transfer: frames.map((f) => f.data.buffer),
+});
+
+// BASE capture: burst → analyze → (close-up pass | finish)
 async function capture(trigger) {
   if (busy) return;
   busy = true;
   running = false;
   setLockRing(0);
-
   navigator.vibrate?.(trigger === "auto" ? [35, 25, 35] : 30);
-  const flash = $("flash");
-  flash.classList.remove("fire");
-  void flash.offsetWidth;
-  flash.classList.add("fire");
+  fireFlash();
 
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  grabCanvas.width = vw;
-  grabCanvas.height = vh;
-  const gctx = grabCanvas.getContext("2d", { willReadFrequently: true });
+  captureStamp = new Date();
+  const liveMarkers = markers;
+  const fMode = fiducialMode;
 
-  const capturedMarkers = markers; // already intrinsic (full-res) pixels
-  const stamp = new Date();
-
-  // burst: grab BURST_N frames over BURST_SPAN_MS; the worker keeps the sharpest
   setStatus("Hold still — capturing…", "ok");
-  const frames = [];
-  for (let i = 0; i < BURST_N; i++) {
-    gctx.drawImage(video, 0, 0, vw, vh);
-    frames.push(gctx.getImageData(0, 0, vw, vh));
-    if (i < BURST_N - 1) await sleep(BURST_SPAN_MS / BURST_N);
-  }
-  // a representative raw preview (middle frame) before the buffers are transferred
-  gctx.putImageData(frames[frames.length >> 1], 0, 0);
-  const rawUrl = await canvasUrl(grabCanvas, "image/jpeg", JPEG_QUALITY);
+  const { frames, vw, vh, g } = await grabBurst();
+  g.putImageData(frames[frames.length >> 1], 0, 0);
+  rawUrlBase = await canvasUrl(grabCanvas, "image/jpeg", JPEG_QUALITY);
 
   setStatus("Analyzing…", "ok");
-  const seqId = ++seq;
-  const msg = await new Promise((resolve) => {
-    analyzeWaiters.set(seqId, resolve);
-    worker.postMessage(
-      {
-        type: "analyze", seq: seqId, mode: fiducialMode, markers: capturedMarkers,
-        frames: frames.map((f) => ({ buffer: f.data.buffer, width: f.width, height: f.height })),
-      },
-      frames.map((f) => f.data.buffer),
-    );
-    setTimeout(() => {
-      if (analyzeWaiters.has(seqId)) { analyzeWaiters.delete(seqId); resolve({ error: "analysis timed out" }); }
-    }, 25000);
-  });
+  const p = framePayload(frames);
+  const msg = await ask(
+    { type: "analyze", mode: fMode, markers: liveMarkers, frames: p.frames }, p.transfer,
+  );
 
-  let capture;
-  let rectUrl = null;
-
-  if (msg && msg.geometry && msg.rectified) {
-    const r = msg.rectified;
-    rectCanvas.width = r.width;
-    rectCanvas.height = r.height;
-    rectCanvas.getContext("2d").putImageData(
-      new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0,
-    );
-    // JPEG: the rectified page is 2550x3300 and a PNG encode of that stalls the
-    // main thread; OCR crops come off rectCanvas (the raw pixels), not this URL
-    rectUrl = await canvasUrl(rectCanvas, "image/jpeg", JPEG_QUALITY);
-    capture = await runExtraction(msg.geometry, rectCanvas);
-  } else {
-    capture = {
-      app: "WJM MobileDeviceDemo",
-      error: (msg && msg.error) || "analysis failed",
-      source: { width: vw, height: vh },
-      detected_fiducials: capturedMarkers.map((m) => ({
-        id: m.id, role: m.role, corners: m.corners.map(([x, y]) => [round1(x), round1(y)]),
-      })),
-    };
+  if (!(msg && msg.geometry && msg.rectified)) {
+    await showErrorReport((msg && msg.error) || "analysis failed", liveMarkers, vw, vh);
+    busy = false;
+    return;
   }
+  paintRect(msg.rectified);
+
+  const targets = (msg.geometry.targets) || [];
+  if (trigger === "auto" && targets.length && $("chk-auto").checked) {
+    startTargetPass(msg.geometry);
+  } else {
+    await showFinalReport(msg.geometry, trigger);
+    busy = false;
+  }
+}
+
+// ---- close-up pass driver ----------------------------------------
+function startTargetPass(geometry) {
+  tgt.targets = geometry.targets || [];
+  tgt.ti = 0;
+  tgt.baseGeometry = geometry;
+  tgt.baseMarkers = {};
+  for (const m of geometry.base_markers_canvas || []) tgt.baseMarkers[m.id] = m;
+  tgt.holdStart = 0;
+  tgt.results = [];
+  mode = "target";
+  $("target-bar").hidden = false;
+  $("controls").hidden = true;
+  markers = [];
+  busy = false;
+  running = true;
+  requestAnimationFrame(loop);
+}
+
+async function captureCloseup() {
+  if (busy) return;
+  busy = true;
+  running = false;
+  navigator.vibrate?.(20);
+  fireFlash();
+  const i = tgt.ti;
+  setStatus(`Close-up ${i + 1}/${tgt.targets.length} — capturing…`, "ok");
+  const { frames } = await grabBurst();
+  const p = framePayload(frames);
+  const msg = await ask(
+    { type: "composite", targetIndex: i, markers, frames: p.frames }, p.transfer,
+  );
+  if (msg && msg.rectified) paintRect(msg.rectified);
+  tgt.results[i] = {
+    ok: !!(msg && msg.ok), method: msg && msg.method,
+    detail: msg && (msg.detail || msg.error),
+  };
+  if (msg && msg.ok) {
+    navigator.vibrate?.([20, 20, 20]);
+  } else {
+    setStatus(`Close-up ${i + 1} skipped — ${(msg && (msg.detail || msg.error)) || "no fix"}`, "warn");
+    await sleep(1100);
+  }
+  advanceTarget();
+}
+
+function advanceTarget() {
+  tgt.ti += 1;
+  tgt.holdStart = 0;
+  busy = false;
+  if (tgt.ti >= tgt.targets.length) {
+    finishPass();
+  } else {
+    running = true;
+    requestAnimationFrame(loop);
+  }
+}
+
+async function finishPass() {
+  mode = "seek";
+  running = false;
+  busy = true;
+  $("target-bar").hidden = true;
+  $("controls").hidden = false;
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  setStatus("Finishing…", "ok");
+  const msg = await ask({ type: "finish" }, [], 30000);
+  if (msg && msg.rectified) paintRect(msg.rectified);
+  // keep the base's burst / source / targets, let finish's fresh recognition win
+  const geometry = { ...tgt.baseGeometry, ...((msg && msg.geometry) || {}) };
+  geometry.close_ups = tgt.results.map((r, i) => ({
+    target: tgt.targets[i], ok: r && r.ok, method: r && r.method, detail: r && r.detail,
+  }));
+  await showFinalReport(geometry, "auto");
+  busy = false;
+}
+
+async function showFinalReport(geometry, trigger) {
+  setStatus("Reading the page…", "ok");
+  const capture = await runExtraction(geometry, rectCanvas);
   capture.app = "WJM MobileDeviceDemo";
-  capture.captured_at = stamp.toISOString();
+  capture.captured_at = captureStamp.toISOString();
   capture.trigger = trigger;
   capture.engine = `OpenCV.js${ocrBackend === "tesseract" ? " + Tesseract.js" : ""} (WebAssembly, Web Worker)`;
 
-  // crop data URLs are for the on-screen report only — keep the JSON lean
+  const rectUrl = await canvasUrl(rectCanvas, "image/jpeg", JPEG_QUALITY);
   const jsonUrl = URL.createObjectURL(new Blob(
     [JSON.stringify(capture, (k, v) => (k === "cropUrl" ? undefined : v), 2)],
     { type: "application/json" },
   ));
-  objectUrls.push(rawUrl, jsonUrl);
-  if (rectUrl) objectUrls.push(rectUrl);
-  showResult({ rawUrl, rectUrl, jsonUrl, capture, stamp, error: capture.error });
+  objectUrls.push(rawUrlBase, rectUrl, jsonUrl);
+  showResult({ rawUrl: rawUrlBase, rectUrl, jsonUrl, capture, stamp: captureStamp, error: capture.error });
   setStatus("Captured", "ok");
-  busy = false;
+}
+
+async function showErrorReport(err, liveMarkers, vw, vh) {
+  const capture = {
+    app: "WJM MobileDeviceDemo",
+    error: err,
+    captured_at: captureStamp.toISOString(),
+    source: { width: vw, height: vh },
+    detected_fiducials: liveMarkers.map((m) => ({
+      id: m.id, role: m.role, corners: m.corners.map(([x, y]) => [round1(x), round1(y)]),
+    })),
+  };
+  const jsonUrl = URL.createObjectURL(new Blob([JSON.stringify(capture, null, 2)], { type: "application/json" }));
+  objectUrls.push(rawUrlBase, jsonUrl);
+  showResult({ rawUrl: rawUrlBase, rectUrl: null, jsonUrl, capture, stamp: captureStamp, error: err });
+  setStatus("Capture failed", "warn");
 }
 
 const METADATA_FIELDS = ["document_id", "page_id", "topic_tags", "left", "above", "below", "right"];
@@ -513,6 +737,8 @@ async function runExtraction(geometry, rect) {
     page_size_estimate: g.page_size_estimate || null,
     detected_fiducials: g.detected_fiducials,
     burst: g.burst || null,
+    targets: g.targets || null,
+    close_ups: g.close_ups || null,
     metadata_block: g.metadata_block,
     sharpness: g.sharpness || null,
     page_metadata: null,
@@ -737,6 +963,16 @@ function sectionExtraction(c, error) {
       + `  (frames ${c.burst.scores.join(", ")})`));
   }
   if (c.normalized) out.push(srow("rectified", `${c.normalized.width}×${c.normalized.height}  (300 DPI)`));
+  if (c.close_ups && c.close_ups.length) {
+    const ok = c.close_ups.filter((x) => x.ok).length;
+    out.push(srow("close-ups", `${ok}/${c.close_ups.length} composited`));
+    for (const x of c.close_ups) {
+      out.push(srow("  " + (x.ok ? "✓" : "✗"),
+        `${(x.method || "—")}${x.detail ? " — " + x.detail : ""}`, x.ok ? "muted" : "err"));
+    }
+  } else if (c.targets && c.targets.length) {
+    out.push(srow("close-ups", `${c.targets.length} planned, none captured`, "muted"));
+  }
   const ps = c.page_size_estimate;
   if (ps) {
     out.push(srow(
@@ -855,7 +1091,11 @@ $("btn-retake").addEventListener("click", () => {
   cropUrls.length = 0;
   $("sec-debug-meta").replaceChildren();
   $("sec-debug-body").replaceChildren();
+  mode = "seek";
+  $("target-bar").hidden = true;
+  $("controls").hidden = false;
   running = true;
+  busy = false;
   lockStart = 0;
   markers = [];
   setStatus("Point at a WJM sheet");
@@ -863,7 +1103,17 @@ $("btn-retake").addEventListener("click", () => {
 });
 
 $("btn-shutter").addEventListener("click", () => {
-  if (!busy && running) capture("manual");
+  if (busy) return;
+  if (mode === "target") captureCloseup();
+  else if (running) capture("manual");
+});
+
+$("btn-skip-target").addEventListener("click", () => {
+  if (mode === "target" && !busy) advanceTarget();
+});
+
+$("btn-finish").addEventListener("click", () => {
+  if (mode === "target" && !busy) { tgt.ti = tgt.targets.length; finishPass(); }
 });
 
 $("btn-flip").addEventListener("click", () => {

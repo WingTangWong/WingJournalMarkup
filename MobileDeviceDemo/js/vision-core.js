@@ -193,6 +193,213 @@
   }
 
   // ===================================================================
+  //  Close-up compositing (SCANNER.md phase B)
+  //  Register a closer re-shot of one region into the fixed rectified canvas
+  //  and paste it in, so that region gets real resolution.
+  // ===================================================================
+
+  const _hasORB = (cv) =>
+    typeof cv.ORB === "function" && typeof cv.BFMatcher === "function" &&
+    typeof cv.findHomography === "function";
+
+  // clamp/validate a 3x3 homography: reject wild scale, shear or projection.
+  function _saneHomography(cv, H) {
+    if (!H || H.rows !== 3 || H.cols !== 3) return false;
+    const d = H.data64F;
+    const sx = Math.hypot(d[0], d[3]);
+    const sy = Math.hypot(d[1], d[4]);
+    if (!(sx > 0.15 && sx < 8 && sy > 0.15 && sy < 8)) return false;
+    if (Math.abs(d[6]) > 0.004 || Math.abs(d[7]) > 0.004) return false; // perspective
+    return true;
+  }
+
+  // Homography closeup-px -> canvas-px from ArUco ids the close-up shares with
+  // the base. `baseCorners` maps id -> [[x,y]*4] in canvas space. Needs >= 2 ids
+  // (>= 8 correspondences) — SCANNER.md's "keep two markers in view".
+  function anchorHomography(cv, closeMarkers, baseCorners) {
+    const srcPts = [];
+    const dstPts = [];
+    let shared = 0;
+    for (const m of closeMarkers || []) {
+      const base = baseCorners[m.id];
+      if (!base) continue;
+      shared += 1;
+      for (let i = 0; i < 4; i++) {
+        srcPts.push(m.corners[i][0], m.corners[i][1]);
+        dstPts.push(base[i][0], base[i][1]);
+      }
+    }
+    if (shared < 2) return { H: null, method: "anchors", shared };
+    const s = cv.matFromArray(srcPts.length / 2, 1, cv.CV_32FC2, srcPts);
+    const d = cv.matFromArray(dstPts.length / 2, 1, cv.CV_32FC2, dstPts);
+    const H = shared >= 3
+      ? cv.findHomography(s, d, cv.RANSAC, 4)
+      : cv.getPerspectiveTransform(s, d);
+    s.delete(); d.delete();
+    if (!_saneHomography(cv, H)) { H.delete(); return { H: null, method: "anchors", shared }; }
+    return { H, method: "anchors", shared };
+  }
+
+  // ORB fallback: match the close-up (gray) against the canvas crop at the
+  // target rect. Returns a closeup-px -> canvas-px homography or null.
+  function orbHomography(cv, closeGray, canvasGray, rect) {
+    if (!_hasORB(cv)) return { H: null, method: "orb", inliers: 0 };
+    const [rx, ry, rw, rh] = rect.map(Math.round);
+    const crop = canvasGray.roi(new cv.Rect(
+      Math.max(0, rx), Math.max(0, ry),
+      Math.min(canvasGray.cols - rx, rw), Math.min(canvasGray.rows - ry, rh),
+    ));
+    const orb = new cv.ORB(1500);
+    const k1 = new cv.KeyPointVector();
+    const k2 = new cv.KeyPointVector();
+    const d1 = new cv.Mat();
+    const d2 = new cv.Mat();
+    orb.detectAndCompute(closeGray, new cv.Mat(), k1, d1);
+    orb.detectAndCompute(crop, new cv.Mat(), k2, d2);
+    let out = { H: null, method: "orb", inliers: 0 };
+    if (d1.rows >= 12 && d2.rows >= 12) {
+      const bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+      const matches = new cv.DMatchVector();
+      bf.match(d1, d2, matches);
+      const pairs = [];
+      for (let i = 0; i < matches.size(); i++) {
+        const m = matches.get(i);
+        if (m.distance < 60) pairs.push([m.queryIdx, m.trainIdx]);
+      }
+      if (pairs.length >= 10) {
+        const sp = [];
+        const dp = [];
+        for (const [q, tr] of pairs) {
+          const p1 = k1.get(q).pt;
+          const p2 = k2.get(tr).pt;
+          sp.push(p1.x, p1.y);
+          dp.push(p2.x + Math.max(0, rx), p2.y + Math.max(0, ry));
+        }
+        const s = cv.matFromArray(sp.length / 2, 1, cv.CV_32FC2, sp);
+        const d = cv.matFromArray(dp.length / 2, 1, cv.CV_32FC2, dp);
+        const mask = new cv.Mat();
+        const H = cv.findHomography(s, d, cv.RANSAC, 5, mask);
+        const inliers = cv.countNonZero(mask);
+        s.delete(); d.delete(); mask.delete();
+        if (inliers >= 12 && _saneHomography(cv, H)) out = { H, method: "orb", inliers };
+        else H.delete();
+      }
+      bf.delete(); matches.delete();
+    }
+    orb.delete(); k1.delete(); k2.delete(); d1.delete(); d2.delete(); crop.delete();
+    return out;
+  }
+
+  // ---- target planning (SCANNER.md PLAN_TARGETS) --------------------
+  const _area = (r) => r[2] * r[3];
+  const _pad = (r, px, W, H) => {
+    const x = Math.max(0, r[0] - px);
+    const y = Math.max(0, r[1] - px);
+    return [x, y, Math.min(W - x, r[2] + 2 * px), Math.min(H - y, r[3] + 2 * px)];
+  };
+  const _overlap = (a, b) =>
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+  const _union = (a, b) => {
+    const x = Math.min(a[0], b[0]);
+    const y = Math.min(a[1], b[1]);
+    return [x, y, Math.max(a[0] + a[2], b[0] + b[2]) - x, Math.max(a[1] + a[3], b[1] + b[3]) - y];
+  };
+
+  /**
+   * Up to 5 canvas-space rects that carry detail worth a closer shot: the
+   * metadata block, any literal-image regions, and clusters of body text lines.
+   * (SCANNER.md — "aruco / box clues".)
+   */
+  function planTargets(canvasW, canvasH, block, literals, lineBoxes) {
+    let rects = [];
+    if (block && block.bbox) rects.push(_pad(block.bbox, canvasH * 0.012, canvasW, canvasH));
+    for (const lit of literals || []) {
+      if (lit && lit.bbox) rects.push(_pad(lit.bbox, canvasH * 0.01, canvasW, canvasH));
+    }
+    // cluster body lines into paragraph-ish blocks (gap < ~4 line-heights); a
+    // block is only worth a close-up if it spans a few lines / enough height
+    const lines = (lineBoxes || []).slice().sort((a, b) => a[1] - b[1]);
+    let cur = null;
+    let n = 0;
+    const flush = () => {
+      if (cur && (n >= 3 || cur[3] >= canvasH * 0.05)) {
+        rects.push(_pad(cur, canvasH * 0.008, canvasW, canvasH));
+      }
+    };
+    for (const lb of lines) {
+      if (cur && lb[1] - (cur[1] + cur[3]) < 4 * lb[3]) { cur = _union(cur, lb); n += 1; }
+      else { flush(); cur = lb.slice(); n = 1; }
+    }
+    flush();
+
+    // merge overlaps, drop specks, clamp each to <= half width / 40% height so a
+    // closer shot actually gains resolution
+    const merged = [];
+    for (const r of rects) {
+      const hit = merged.find((m) => _overlap(m, r));
+      if (hit) Object.assign(hit, _union(hit, r));
+      else merged.push(r.slice());
+    }
+    const minArea = 0.012 * canvasW * canvasH;
+    const maxW = canvasW * 0.55;
+    const maxH = canvasH * 0.42;
+    const out = merged.map((r) => {
+      if (r[2] <= maxW && r[3] <= maxH) return r;
+      const cx = r[0] + r[2] / 2;
+      const cy = r[1] + r[3] / 2;
+      const w = Math.min(r[2], maxW);
+      const h = Math.min(r[3], maxH);
+      return [
+        Math.max(0, Math.min(canvasW - w, cx - w / 2)),
+        Math.max(0, Math.min(canvasH - h, cy - h / 2)),
+        w, h,
+      ];
+    }).filter((r) => _area(r) >= minArea);
+    out.sort((a, b) => _area(b) - _area(a));
+    return out.slice(0, 5).map((r) => r.map((v) => Math.round(v)));
+  }
+
+  // Warp `closeSrc` (RGBA) through H into canvas space and alpha-feather it over
+  // `canvas` (RGBA), clipped to `rect` [x,y,w,h]. Mutates `canvas`.
+  function compositeInto(cv, canvas, closeSrc, H, rect, feather = 14) {
+    const [rx, ry, rw, rh] = rect.map(Math.round);
+    const warped = new cv.Mat();
+    cv.warpPerspective(
+      closeSrc, warped, H, new cv.Size(canvas.cols, canvas.rows),
+      cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0),
+    );
+    // feathered rectangular mask for the target region
+    const mask = cv.Mat.zeros(canvas.rows, canvas.cols, cv.CV_8UC1);
+    cv.rectangle(
+      mask, new cv.Point(rx + feather, ry + feather),
+      new cv.Point(rx + rw - feather, ry + rh - feather),
+      new cv.Scalar(255), -1,
+    );
+    if (feather > 0) cv.GaussianBlur(mask, mask, new cv.Size(0, 0), feather / 2);
+    // also mask out where the warp produced nothing (alpha 0)
+    const chans = new cv.MatVector();
+    cv.split(warped, chans);
+    const alpha = chans.get(3);
+    cv.min(mask, alpha, mask);
+    chans.delete(); alpha.delete();
+
+    const m3 = new cv.Mat();
+    cv.cvtColor(mask, m3, cv.COLOR_GRAY2RGBA);
+    m3.convertTo(m3, cv.CV_32FC4, 1 / 255);
+    const fg = new cv.Mat();
+    const bg = new cv.Mat();
+    warped.convertTo(fg, cv.CV_32FC4);
+    canvas.convertTo(bg, cv.CV_32FC4);
+    cv.multiply(fg, m3, fg);
+    const inv = new cv.Mat();
+    cv.subtract(new cv.Mat(m3.rows, m3.cols, cv.CV_32FC4, new cv.Scalar(1, 1, 1, 1)), m3, inv);
+    cv.multiply(bg, inv, bg);
+    cv.add(fg, bg, bg);
+    bg.convertTo(canvas, cv.CV_8UC4);
+    warped.delete(); mask.delete(); m3.delete(); fg.delete(); bg.delete(); inv.delete();
+  }
+
+  // ===================================================================
   //  Geometric recognition — ports of
   //    src/wingjournal/recognition/metadata_block.py
   //    src/wingjournal/recognition/text/segment.py
@@ -927,6 +1134,7 @@
   root.WJMVision = {
     ROLE_BY_ID, ROLE_ORDER, TARGET_LONG_PX, CORNER_STICKER_ID,
     hasAruco, MarkerDetector, pageQuadFromMarkers, outputSize, rectify, tenengrad, dist,
+    planTargets, anchorHomography, orbHomography, compositeInto,
     detectMetadataBlock, segmentLines, detectLiteralAssets, maskLiterals,
     detectRegistrationMarks, marksToQuad, laplacianVariance, assessSharpness, edgeAcutance,
     detectCornerStickers, stickerQuad, estimatePageSize,

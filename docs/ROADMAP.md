@@ -81,13 +81,16 @@ stage-for-stage map in `MobileDeviceDemo/README.md`.
 - ✅ Ports of `vision/registration.py` + `vision/sharpness.py`: metadata block
       from the concentric-square marks, and a hard sharpness gate on auto-capture
       (spec §9.1, §11.1)
-- ✅ Two-phase capture (spec §9.1): live feed for lock-on only
-      (red→orange→yellow→green), then a full-resolution grab; the grab is scored
-      at the fiducials *before* rectify and a soft auto-grab is rejected with
-      "move closer / hold steady" coaching + the soft markers flagged, dropping
-      back to the feed. Track pushed to sensor-max + continuous AF on start
-      (no `ImageCapture` on Safari). Normalized long side scales with the page's
-      real pixel span (1600–2800 px) instead of a fixed 1600
+- ✅ Multi-shot scanner (`MobileDeviceDemo/SCANNER.md`), phases A + B: lock →
+      **burst**, worker keeps the sharpest frame (Tenengrad), no accept/reject
+      gate; rectify to a fixed 2550×3300 (8.5×11 @ 300 DPI) canvas
+      (INTER_AREA/LINEAR, never CUBIC); **plan ≤5 close-up targets** and, in a
+      guided pass, re-shoot each and feather-composite it in (anchor homography
+      from ≥2 shared ArUco ids, ORB fallback); `finish` re-recognises the
+      composite. Track pushed to sensor-max + continuous AF (no `ImageCapture`
+      on Safari). ⬜ Phase C: re-assess loop. ⬜ Native app for a real single
+      high-res capture. Also ✅ ported the `field_anchors` metadata path to
+      `vision-core.js`
 - ✅ Port of `vision/corner_sticker.py`: **sticker mode** — four id-10 stickers
       → roles + page quad from geometry/wedge tips, physical page-size estimate
       shown in the report (spec §11.2)
