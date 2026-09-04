@@ -236,6 +236,56 @@ cv.onRuntimeInitialized = () => {
     H.delete(); canvas.delete(); close.delete();
   });
 
+  t("akazeHomography -> matches a rotated, zoomed close-up to text landmarks", () => {
+    // a "page" with a text-bearing region (the kind of thing SCANNER.md calls
+    // a close-up target) and nothing else distinctive nearby
+    const CW = 1400, CH = 1800;
+    const canvas = new cv.Mat(CH, CW, cv.CV_8UC1, new cv.Scalar(255));
+    const landmarkRect = [300, 500, 700, 220];
+    cv.putText(canvas, "RESEARCH PROJECT NOTES", new cv.Point(320, 570),
+      cv.FONT_HERSHEY_SIMPLEX, 1.0, new cv.Scalar(0), 3, cv.LINE_AA);
+    cv.putText(canvas, "the quick brown fox jumps", new cv.Point(320, 630),
+      cv.FONT_HERSHEY_SIMPLEX, 0.75, new cv.Scalar(0), 2, cv.LINE_AA);
+    cv.putText(canvas, "over the lazy sleeping dog", new cv.Point(320, 680),
+      cv.FONT_HERSHEY_SIMPLEX, 0.75, new cv.Scalar(0), 2, cv.LINE_AA);
+
+    // a close-up shot the way a phone rotated ~28 degrees (e.g. turned toward
+    // landscape for a wide target) and zoomed in would actually produce
+    const crop = canvas.roi(new cv.Rect(
+      landmarkRect[0] - 20, landmarkRect[1] - 20, landmarkRect[2] + 40, landmarkRect[3] + 40,
+    ));
+    const angle = 28;
+    const M = cv.getRotationMatrix2D(new cv.Point(crop.cols / 2, crop.rows / 2), angle, 1.35);
+    const close = new cv.Mat();
+    cv.warpAffine(
+      crop, close, M, new cv.Size(Math.round(crop.cols * 1.3), Math.round(crop.rows * 1.3)),
+      cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255),
+    );
+
+    const rect = [
+      landmarkRect[0] - 40, landmarkRect[1] - 40, landmarkRect[2] + 80, landmarkRect[3] + 80,
+    ];
+    const res = V.akazeHomography(cv, close, canvas, rect, [landmarkRect]);
+    assert.ok(res.H, "AKAZE should register a rotated close-up against the text landmark");
+    assert.ok(res.inliers >= 8, `too few inliers: ${res.inliers}`);
+
+    // the close-up's own centre, projected through H, should land back near
+    // the landmark it was actually a photo of
+    const h = res.H.data64F;
+    const cx = close.cols / 2;
+    const cy = close.rows / 2;
+    const w = h[6] * cx + h[7] * cy + h[8];
+    const px = (h[0] * cx + h[1] * cy + h[2]) / w;
+    const py = (h[3] * cx + h[4] * cy + h[5]) / w;
+    assert.ok(
+      px > rect[0] - 60 && px < rect[0] + rect[2] + 60
+      && py > rect[1] - 60 && py < rect[1] + rect[3] + 60,
+      `projected centre (${px.toFixed(0)},${py.toFixed(0)}) missed the target rect ${rect}`,
+    );
+
+    res.H.delete(); crop.delete(); close.delete(); canvas.delete(); M.delete();
+  });
+
   sheet.delete();
   console.log(`\n${pass} passed`);
   process.exit(process.exitCode || 0);

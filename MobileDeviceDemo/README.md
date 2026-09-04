@@ -54,7 +54,7 @@ also gives you HTTPS without certs.
 
 | Where | What |
 |---|---|
-| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; `analyze` picks the sharpest burst frame (Tenengrad), rectifies to a fixed 2550×3300 canvas, runs the recognition geometry, plans close-up targets, and keeps the canvas in a session; `composite` registers + feather-pastes each close-up (anchor / ORB homography); `finish` re-recognises the composite. Keeps the 11 MB compile and all pixel work off the UI thread. |
+| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; `analyze` picks the sharpest burst frame (Tenengrad), rectifies to a fixed 2550×3300 canvas, runs the recognition geometry, plans close-up targets, and keeps the canvas in a session; `composite` registers + feather-pastes each close-up (ArUco anchor homography, then AKAZE/ORB restricted to text landmarks — all rotation-tolerant, so the phone can be turned any way); `finish` re-recognises the composite. Keeps the 11 MB compile and all pixel work off the UI thread. |
 | **Tesseract.js** (its own worker, spawned from the main thread) | OCR of the metadata cells and each body line off the rectified page. |
 | **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR → parse. |
 | **`js/wjm-parse.js`** | The WJM grammar + element parser (bullets, tags, temporal, references, contacts). Pure text, no dependencies. |
@@ -80,9 +80,12 @@ See [`SCANNER.md`](SCANNER.md) for the full state machine. **Phases A + B**:
    (pending) / green (done). **Manual-first** — a dedicated shutter button fires
    the close-up burst on tap, any time; a steady 2-marker lock also auto-fires
    after 300 ms as a bonus, but isn't required. Either way the worker registers
-   whatever framing the burst got (`anchorHomography` from ≥2 shared ArUco ids,
-   `orbHomography` fallback) and feather-composites it. **Skip this** / **Use
-   what I have** end the pass early.
+   whatever framing the burst got — `anchorHomography` from ≥2 shared ArUco
+   ids, or `akazeHomography`/`orbHomography` restricted to the base capture's
+   own text landmarks — and feather-composites it. **The phone can be held any
+   way**, including turned to landscape for a wide target: point-correspondence
+   and feature-based registration both carry rotation without special-casing.
+   **Skip this** / **Use what I have** end the pass early.
 6. `finish` recognises the composited canvas; the main thread OCRs each cell and
    line, runs `wjm-parse`, assembles the record. The review screen lists which
    close-ups composited and how.

@@ -240,54 +240,117 @@
     return { H, method: "anchors", shared };
   }
 
-  // ORB fallback: match the close-up (gray) against the canvas crop at the
-  // target rect. Returns a closeup-px -> canvas-px homography or null.
-  function orbHomography(cv, closeGray, canvasGray, rect) {
-    if (!_hasORB(cv)) return { H: null, method: "orb", inliers: 0 };
-    const [rx, ry, rw, rh] = rect.map(Math.round);
-    const crop = canvasGray.roi(new cv.Rect(
-      Math.max(0, rx), Math.max(0, ry),
-      Math.min(canvasGray.cols - rx, rw), Math.min(canvasGray.rows - ry, rh),
-    ));
-    const orb = new cv.ORB(1500);
-    const k1 = new cv.KeyPointVector();
-    const k2 = new cv.KeyPointVector();
-    const d1 = new cv.Mat();
-    const d2 = new cv.Mat();
-    orb.detectAndCompute(closeGray, new cv.Mat(), k1, d1);
-    orb.detectAndCompute(crop, new cv.Mat(), k2, d2);
-    let out = { H: null, method: "orb", inliers: 0 };
-    if (d1.rows >= 12 && d2.rows >= 12) {
-      const bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
-      const matches = new cv.DMatchVector();
-      bf.match(d1, d2, matches);
-      const pairs = [];
-      for (let i = 0; i < matches.size(); i++) {
-        const m = matches.get(i);
-        if (m.distance < 60) pairs.push([m.queryIdx, m.trainIdx]);
-      }
-      if (pairs.length >= 10) {
-        const sp = [];
-        const dp = [];
-        for (const [q, tr] of pairs) {
-          const p1 = k1.get(q).pt;
-          const p2 = k2.get(tr).pt;
-          sp.push(p1.x, p1.y);
-          dp.push(p2.x + Math.max(0, rx), p2.y + Math.max(0, ry));
-        }
-        const s = cv.matFromArray(sp.length / 2, 1, cv.CV_32FC2, sp);
-        const d = cv.matFromArray(dp.length / 2, 1, cv.CV_32FC2, dp);
-        const mask = new cv.Mat();
-        const H = cv.findHomography(s, d, cv.RANSAC, 5, mask);
-        const inliers = cv.countNonZero(mask);
-        s.delete(); d.delete(); mask.delete();
-        if (inliers >= 12 && _saneHomography(cv, H)) out = { H, method: "orb", inliers };
-        else H.delete();
-      }
-      bf.delete(); matches.delete();
+  const _hasAKAZE = (cv) => typeof cv.AKAZE === "function";
+
+  // A mask (8-bit, same size as a `rect`-sized crop) that's white only over
+  // known content — text lines + metadata cells from the base capture — so
+  // feature detection lands on real landmarks (glyph strokes/corners) instead
+  // of blank paper texture or compression noise. `rects` are canvas-space
+  // [x,y,w,h]; `cropX/cropY` is the crop's canvas-space origin.
+  function landmarkMask(cv, rows, cols, rects, cropX, cropY) {
+    const m = cv.Mat.zeros(rows, cols, cv.CV_8UC1);
+    let any = false;
+    for (const r of rects || []) {
+      const x0 = Math.max(0, Math.round(r[0] - cropX));
+      const y0 = Math.max(0, Math.round(r[1] - cropY));
+      const x1 = Math.min(cols, Math.round(r[0] + r[2] - cropX));
+      const y1 = Math.min(rows, Math.round(r[1] + r[3] - cropY));
+      if (x1 - x0 < 2 || y1 - y0 < 2) continue;
+      cv.rectangle(m, new cv.Point(x0, y0), new cv.Point(x1, y1), new cv.Scalar(255), -1);
+      any = true;
     }
-    orb.delete(); k1.delete(); k2.delete(); d1.delete(); d2.delete(); crop.delete();
+    // an empty/blank mask would find nothing everywhere; fall back to "search
+    // the whole crop" rather than starve the detector
+    if (!any) m.setTo(new cv.Scalar(255));
+    return m;
+  }
+
+  function _detectCompute(cv, detector, gray, mask) {
+    const kp = new cv.KeyPointVector();
+    const desc = new cv.Mat();
+    detector.detectAndCompute(gray, mask || new cv.Mat(), kp, desc);
+    return { kp, desc };
+  }
+
+  // Ratio-test match (Lowe's test — robust regardless of descriptor length,
+  // unlike a fixed Hamming-distance cutoff) + RANSAC homography. `ORB` and
+  // `AKAZE` keypoints both carry a computed dominant orientation and their
+  // descriptors (rotated BRIEF / MLDB) are sampled relative to it, so this
+  // matches correctly however the phone was rotated for the close-up —
+  // in-plane rotation is exactly what these two detectors are built to
+  // tolerate; no extra rotation search is needed.
+  function _matchAndHomography(cv, k1, d1, k2, d2, offsetX, offsetY, minInliers, method) {
+    let out = { H: null, method, inliers: 0 };
+    if (d1.rows < 2 || d2.rows < 2) return out;
+    const bf = new cv.BFMatcher(cv.NORM_HAMMING);
+    const knn = new cv.DMatchVectorVector();
+    bf.knnMatch(d1, d2, knn, 2);
+    const sp = [];
+    const dp = [];
+    for (let i = 0; i < knn.size(); i++) {
+      const pair = knn.get(i);
+      if (pair.size() < 2) continue;
+      const m = pair.get(0);
+      const n = pair.get(1);
+      if (m.distance < 0.75 * n.distance) {
+        const p1 = k1.get(m.queryIdx).pt;
+        const p2 = k2.get(m.trainIdx).pt;
+        sp.push(p1.x, p1.y);
+        dp.push(p2.x + offsetX, p2.y + offsetY);
+      }
+    }
+    bf.delete(); knn.delete();
+    if (sp.length / 2 >= minInliers) {
+      const s = cv.matFromArray(sp.length / 2, 1, cv.CV_32FC2, sp);
+      const d = cv.matFromArray(dp.length / 2, 1, cv.CV_32FC2, dp);
+      const mask = new cv.Mat();
+      const H = cv.findHomography(s, d, cv.RANSAC, 5, mask);
+      const inliers = cv.countNonZero(mask);
+      s.delete(); d.delete(); mask.delete();
+      if (inliers >= minInliers && _saneHomography(cv, H)) out = { H, method, inliers };
+      else H.delete();
+    }
     return out;
+  }
+
+  // Feature-match the close-up (gray) against the canvas crop at `rect`.
+  // `landmarks` (optional, canvas-space rects) restrict where keypoints are
+  // sought on the canvas side to known text/content. Returns a
+  // closeup-px -> canvas-px homography or null.
+  function _featureHomography(cv, method, closeGray, canvasGray, rect, landmarks) {
+    const [rx, ry, rw, rh] = rect.map(Math.round);
+    const cx0 = Math.max(0, rx);
+    const cy0 = Math.max(0, ry);
+    const cw = Math.min(canvasGray.cols - cx0, rw);
+    const ch = Math.min(canvasGray.rows - cy0, rh);
+    if (cw < 8 || ch < 8) return { H: null, method, inliers: 0 };
+    const crop = canvasGray.roi(new cv.Rect(cx0, cy0, cw, ch));
+    const mask = landmarks ? landmarkMask(cv, ch, cw, landmarks, cx0, cy0) : null;
+
+    const detector = method === "akaze" ? new cv.AKAZE() : new cv.ORB(1800);
+    const a = _detectCompute(cv, detector, closeGray, null);
+    const b = _detectCompute(cv, detector, crop, mask);
+    const out = _matchAndHomography(cv, a.kp, a.desc, b.kp, b.desc, cx0, cy0, 8, method);
+
+    detector.delete();
+    a.kp.delete(); a.desc.delete(); b.kp.delete(); b.desc.delete();
+    crop.delete();
+    if (mask) mask.delete();
+    return out;
+  }
+
+  // AKAZE: nonlinear-diffusion scale space handles blur/soft focus (a phone
+  // close-up) better than ORB's pyramid in practice; try it first.
+  function akazeHomography(cv, closeGray, canvasGray, rect, landmarks) {
+    if (!_hasAKAZE(cv)) return { H: null, method: "akaze", inliers: 0 };
+    return _featureHomography(cv, "akaze", closeGray, canvasGray, rect, landmarks);
+  }
+
+  // ORB fallback: faster, more keypoints — a second chance when AKAZE's
+  // stricter response threshold finds too little on very sparse content.
+  function orbHomography(cv, closeGray, canvasGray, rect, landmarks) {
+    if (!_hasORB(cv)) return { H: null, method: "orb", inliers: 0 };
+    return _featureHomography(cv, "orb", closeGray, canvasGray, rect, landmarks);
   }
 
   // ---- target planning (SCANNER.md PLAN_TARGETS) --------------------
@@ -1166,7 +1229,7 @@
   root.WJMVision = {
     ROLE_BY_ID, ROLE_ORDER, TARGET_LONG_PX, CORNER_STICKER_ID,
     hasAruco, MarkerDetector, pageQuadFromMarkers, outputSize, rectify, tenengrad, dist,
-    planTargets, anchorHomography, orbHomography, compositeInto,
+    planTargets, anchorHomography, akazeHomography, orbHomography, landmarkMask, compositeInto,
     detectMetadataBlock, segmentLines, detectLiteralAssets, maskLiterals,
     detectRegistrationMarks, marksToQuad, laplacianVariance, assessSharpness, edgeAcutance,
     detectCornerStickers, stickerQuad, estimatePageSize,

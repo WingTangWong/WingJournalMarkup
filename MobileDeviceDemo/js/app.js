@@ -311,7 +311,19 @@ function liveSimilarity(view) {
     if (bm) pairs.push({ v: m.center, c: bm.center });
   }
   if (pairs.length < 2) return { ok: false, nShared: pairs.length, map: null, mat: null };
-  const [p, q] = pairs;
+  // the farthest-apart pair gives the best-conditioned rotation/scale estimate
+  // — two markers close together amplify angle noise, which bites hardest
+  // exactly when the phone is held at an angle (rotated toward landscape for
+  // a wide target)
+  let p = pairs[0];
+  let q = pairs[1];
+  let bestD = -1;
+  for (let i = 0; i < pairs.length; i++) {
+    for (let j = i + 1; j < pairs.length; j++) {
+      const d = dist(pairs[i].c, pairs[j].c);
+      if (d > bestD) { bestD = d; p = pairs[i]; q = pairs[j]; }
+    }
+  }
   const cd = dist(p.c, q.c);
   if (cd < 1) return { ok: false, nShared: pairs.length, map: null, mat: null };
   const s = dist(p.v, q.v) / cd;

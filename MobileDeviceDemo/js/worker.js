@@ -34,11 +34,11 @@ let detector = null;
 const LETTER_PX = [2550, 3300];
 
 // live compositing session: the base canvas + its fiducials in canvas space
-let session = { canvas: null, baseCorners: {}, targets: [], stickerMode: false };
+let session = { canvas: null, baseCorners: {}, targets: [], landmarks: [], stickerMode: false };
 
 function resetSession() {
   if (session.canvas) { try { session.canvas.delete(); } catch (e) { /* */ } }
-  session = { canvas: null, baseCorners: {}, targets: [], stickerMode: false };
+  session = { canvas: null, baseCorners: {}, targets: [], landmarks: [], stickerMode: false };
 }
 
 self.onmessage = (e) => {
@@ -250,6 +250,13 @@ function onAnalyze({ seq, frames, markers, mode }) {
     if (!stickerMode) {
       for (const m of geo.normMarkers) session.baseCorners[m.id] = m.corners;
     }
+    // known text/content rects (canvas space) — used to steer feature
+    // matching onto real landmarks instead of blank paper when a close-up
+    // has too few (or no) shared ArUco anchors to register by directly
+    session.landmarks = [
+      ...(geo.block ? [...geo.block.row1_cells, ...geo.block.row2_cells] : []),
+      ...geo.lineBoxes,
+    ];
     progress("planning close-ups");
     session.targets = V.planTargets(nw, nh, geo.block, geo.literals, geo.lineBoxes);
 
@@ -308,20 +315,39 @@ function onComposite({ seq, targetIndex, frames }) {
     const src = keep(best.src);
     const graySrc = keep(best.gray);
 
+    // registration cascade — each stage is rotation-tolerant on its own, so a
+    // close-up taken with the phone held any way (including sideways for a
+    // wide target) still lines up:
+    //  1. shared ArUco anchors (exact, when the page has them and >=2 are in
+    //     frame) — a homography from point correspondences carries rotation
+    //     without any special-casing;
+    //  2. AKAZE, restricted to known text/content landmarks on the base side
+    //     (metadata cells + body lines) so matches land on real ink, not
+    //     paper texture — handles blur well;
+    //  3. ORB over the same landmarks, as a second try with more (cheaper,
+    //     noisier) keypoints when AKAZE's stricter response found too few.
+    // ORB/AKAZE keypoints each carry their own dominant orientation and their
+    // descriptors are sampled relative to it, so no separate "try every
+    // rotation" step is needed — that is what makes them rotation-tolerant.
     progress("registering the close-up");
     const closeMarkers = detector.detect(graySrc);
     let res = { H: null, method: "none" };
     if (!session.stickerMode) res = V.anchorHomography(cv, closeMarkers, session.baseCorners);
     if (!res.H) {
       const cg = keep(grayOf(session.canvas));
-      res = V.orbHomography(cv, graySrc, cg, rect);
+      progress("matching landmarks (AKAZE)");
+      res = V.akazeHomography(cv, graySrc, cg, rect, session.landmarks);
+      if (!res.H) {
+        progress("matching landmarks (ORB)");
+        res = V.orbHomography(cv, graySrc, cg, rect, session.landmarks);
+      }
     }
     if (!res.H) {
       return post({
         type: "composited", seq, ok: false, method: res.method,
         detail: res.method === "anchors"
           ? `only ${res.shared || 0} shared marker(s) — keep two in view`
-          : "couldn't line the close-up up with the page",
+          : "couldn't line the close-up up with the page — try holding it steadier",
       });
     }
 
@@ -332,7 +358,7 @@ function onComposite({ seq, targetIndex, frames }) {
     sendCanvas("composited", seq, {
       ok: true, method: res.method,
       detail: res.method === "anchors"
-        ? `${res.shared} anchors` : `ORB, ${res.inliers} inliers`,
+        ? `${res.shared} anchors` : `${res.method}, ${res.inliers} inliers`,
       focus: Math.round(best.score * 100) / 100,
     });
   } catch (err) {
