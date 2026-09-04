@@ -84,12 +84,27 @@ def ingest_image(
     parse_body: bool = False,
 ) -> IngestResult:
     from wingjournal.recognition.text import get_recognizer
+    from wingjournal.vision.aruco import CORNER_STICKER_ID
+    from wingjournal.vision.corner_sticker import (
+        detect_corner_stickers,
+        estimate_page_size,
+        sticker_quad,
+    )
 
     rec = get_recognizer(recognizer)
     pre = preprocess(image)
     markers = detect_markers(pre.gray, dict_name)
 
-    boundary, hypotheses, squares = select_boundary(pre, markers, weights=weights)
+    # adhesive corner stickers (spec §11.2): a page quad from the wedge tips and
+    # a physical page-size guess from the known sticker scale
+    sheet_markers = [m for m in markers if m.marker_id != CORNER_STICKER_ID]
+    has_stickers = len(markers) != len(sheet_markers)
+    stickers = detect_corner_stickers(pre.gray, dict_name) if has_stickers else []
+    sq = sticker_quad(stickers)
+
+    boundary, hypotheses, squares = select_boundary(
+        pre, sheet_markers, weights=weights, sticker_quad=sq
+    )
 
     quad = np.asarray(boundary.polygon, dtype=np.float32)
     provisional, provisional_h = rectify(image, quad)
@@ -106,6 +121,13 @@ def ingest_image(
         tuple(map(float, cv2.boundingRect(np.asarray(m.corners, dtype=np.float32))))
         for m in norm_markers
     ]
+
+    # page size guessed from the sticker scale on the *normalized* page — no
+    # perspective there, so the ArUco px/mm is clean (spec §11.2)
+    size_estimate = None
+    if has_stickers:
+        norm_stickers = detect_corner_stickers(normalized, dict_name)
+        size_estimate = estimate_page_size(norm_stickers or stickers, dict_name)
 
     # literal / image regions (spec §16) are detected and masked *before* the
     # detailed recognition stages so their contents never become elements (§36)
@@ -161,6 +183,7 @@ def ingest_image(
         metadata_block=dataclasses.asdict(metadata_block) if metadata_block else None,
         page_metadata=page_metadata,
         sharpness=dataclasses.asdict(sharp),
+        page_size_estimate=dataclasses.asdict(size_estimate) if size_estimate else None,
         text_backend=rec.name,
         literal_assets=[dataclasses.asdict(a) for a in literals],
         detected_elements=elements,
@@ -173,6 +196,16 @@ def ingest_image(
         + (" (flip ambiguous)" if orientation.flip_ambiguous else "")
     )
     capture.notes.append(sharp.summary() + (" - BLURRY, retake" if sharp.blurry else ""))
+    if stickers:
+        found = sum(s.bracket_found for s in stickers)
+        note = f"{len(stickers)} corner sticker(s), {found} with a bracket"
+        if size_estimate is not None:
+            note += (
+                f"; page ~{size_estimate.width_mm:.0f}x{size_estimate.height_mm:.0f} mm"
+                + (f" ({size_estimate.best_match})" if size_estimate.best_match
+                   else " (no standard match)")
+            )
+        capture.notes.append(note)
     if metadata_block is not None:
         capture.notes.append(
             f"metadata block via {metadata_block.detection}: {len(metadata_block.row1_cells)}+"

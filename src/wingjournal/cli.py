@@ -6,6 +6,7 @@
     history         show a stored page's capture timeline
     make-sheet      write a printable blank writing sheet (PDF or PNG)
     make-legend     write a printable WJM markup legend (PDF)
+    make-stickers   write a printable sheet of adhesive ArUco corner stickers
     make-test-page  write a synthetic WJM page image (flat or perspective-warped)
     eval            score boundary + orientation detection on a synthetic corpus
     dictionaries    list available ArUco dictionaries
@@ -194,6 +195,17 @@ def _cmd_make_legend(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_make_stickers(args: argparse.Namespace) -> int:
+    from wingjournal.templates.corner_sticker import build_sticker_sheet
+
+    out = build_sticker_sheet(
+        args.out, paper=args.paper, sticker_mm=args.sticker_mm,
+        count=args.count, dpi=args.dpi, dict_name=args.dict,
+    )
+    print(f"wrote {out} ({args.count} stickers, {args.sticker_mm:g} mm)")
+    return 0
+
+
 def _cmd_make_test_page(args: argparse.Namespace) -> int:
     import cv2
 
@@ -270,6 +282,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_legend.add_argument("--paper", default="letter", choices=("letter", "a4", "legal"))
     p_legend.add_argument("--dpi", type=int, default=200)
     p_legend.set_defaults(func=_cmd_make_legend)
+
+    p_stk = sub.add_parser(
+        "make-stickers",
+        help="printable sheet of adhesive ArUco corner stickers (spec §11.2)",
+    )
+    p_stk.add_argument(
+        "--out", default="wjm-corner-stickers.pdf", help="output path (.pdf or image)",
+    )
+    p_stk.add_argument("--paper", default="letter", choices=("letter", "a4", "legal"))
+    p_stk.add_argument("--dpi", type=int, default=300)
+    p_stk.add_argument("--dict", default=_DEFAULT_DICT, help="ArUco dictionary name")
+    p_stk.add_argument("--sticker-mm", type=float, default=26.0, help="sticker size in mm")
+    p_stk.add_argument("--count", type=int, default=12, help="how many stickers to print")
+    p_stk.set_defaults(func=_cmd_make_stickers)
 
     p_make = sub.add_parser("make-test-page", help="synthetic WJM page image for testing")
     p_make.add_argument("--out", default="test-page.png", help="output image path")

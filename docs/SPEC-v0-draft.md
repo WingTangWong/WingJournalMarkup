@@ -459,6 +459,44 @@ Detection reads the block two ways, in order:
 
 The marks also serve as sharpness probes (§9.1).
 
+### 11.2 Adhesive Corner Stickers
+
+Instead of a printed sheet, four **identical** adhesive ArUco stickers
+(``CORNER_STICKER_ID``, a reserved id distinct from the printed sheet's
+``0/1/2/3``) turn any page into a WJM page. Each sticker carries a solid
+photo-corner **wedge** (its right-angle vertex tucks into the paper corner) and
+a thin edge rule, both pointing the same way. ``make-stickers`` prints a grid of
+them; the user rotates each 90° for its corner.
+
+Because the stickers are identical, the id is not the corner — geometry (the
+constellation) and the wedge direction give the role. Detection yields, per
+sticker:
+
+```python
+CornerSticker(
+    outward=[-0.6, -0.8],        # unit vector, marker centre -> page corner
+    corner_point=[x, y],         # wedge tip = the page corner (tucked in), or extrapolated
+    bracket_found=True,
+    inferred_role="TOP_LEFT",
+)
+```
+
+The wedge tips are the page quadrilateral (a ``corner_stickers`` boundary
+hypothesis). The sticker ArUco is a **fixed physical size**, so its scale in
+pixels gives px/mm and the constellation gives a page-size guess:
+
+```python
+PageSizeEstimate(
+    width_mm=214.0, height_mm=277.0,
+    best_match="letter", match_error_mm=6.0,
+    method="corner_stickers",
+)
+```
+
+This is a hint, not a measurement — good on a flat capture, rough under strong
+perspective; ``match_error_mm`` carries the uncertainty and ``best_match`` is
+``None`` when it is too ambiguous to name.
+
 Schema:
 
 ```python

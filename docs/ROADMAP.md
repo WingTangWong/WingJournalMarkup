@@ -30,7 +30,12 @@ help a person produce scannable pages.
 - ✅ Layout math in mm → px (`templates/geometry.py`); pages rendered as the
       exact raster the detector will see, so `make-sheet` output round-trips
       through `ingest`
-- ⬜ Sticker-sheet / cut-guide PDF for adhesive corner markers
+- ✅ `wingjournal make-stickers` — printable sheet of identical adhesive ArUco
+      corner stickers (`CORNER_STICKER_ID`, distinct from the sheet's 0/1/2/3),
+      each with a photo-corner wedge that tucks into the paper corner. Detection
+      (`vision/corner_sticker.py`): wedge tips → a `corner_stickers` boundary
+      hypothesis; the fixed sticker ArUco size → a physical page-size estimate
+      (`Capture.page_size_estimate`, best-match paper + error). Spec §11.2
 - ⬜ Overlay-template mode (fiducials only, handwritten page identity)
 
 ---

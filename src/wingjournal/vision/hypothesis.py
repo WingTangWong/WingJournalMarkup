@@ -183,10 +183,21 @@ def generate_hypotheses(
     pre: Preprocessed,
     markers: list[DetectedMarker],
     squares: list[FiducialCandidate] | None = None,
+    sticker_quad: np.ndarray | None = None,
 ) -> list[PageHypothesis]:
     squares = squares or []
     h, w = pre.gray.shape[:2]
     out: list[PageHypothesis] = []
+
+    # 0. adhesive corner stickers: wedge tips are the page corners (spec §11.2)
+    if sticker_quad is not None:
+        out.append(
+            PageHypothesis(
+                polygon=order_points(np.asarray(sticker_quad, dtype=np.float32)).tolist(),
+                source="corner_stickers",
+                decoded_fiducials=len(sticker_quad),
+            )
+        )
 
     # 1. full marker constellation (outer corners)
     quad = quad_from_markers(markers)
@@ -295,11 +306,12 @@ def rank_hypotheses(
     markers: list[DetectedMarker],
     squares: list[FiducialCandidate] | None = None,
     weights: ScoringWeights | None = None,
+    sticker_quad: np.ndarray | None = None,
 ) -> list[PageHypothesis]:
     weights = weights or ScoringWeights()
     scored = [
         score_hypothesis(h, pre, weights)
-        for h in generate_hypotheses(pre, markers, squares)
+        for h in generate_hypotheses(pre, markers, squares, sticker_quad)
     ]
     scored.sort(key=lambda h: h.score, reverse=True)
     return scored
@@ -316,17 +328,19 @@ def select_boundary(
     squares: list[FiducialCandidate] | None = None,
     weights: ScoringWeights | None = None,
     max_passes: int = 3,
+    sticker_quad: np.ndarray | None = None,
 ) -> tuple[PageBoundary, list[PageHypothesis], list[FiducialCandidate]]:
     """Iteratively rank hypotheses (spec section 34) and return the winner.
 
     Each pass re-detects corner squares near the current best frame; it stops
     when a pass no longer improves the score or the frame stops moving.
+    ``sticker_quad`` is the page quad from adhesive corner stickers (spec §11.2).
     """
 
     if squares is None:
         squares = find_square_candidates(pre, exclude=markers)
 
-    ranked = rank_hypotheses(pre, markers, squares, weights)
+    ranked = rank_hypotheses(pre, markers, squares, weights, sticker_quad)
     best = ranked[0]
     h, w = pre.gray.shape[:2]
     converge = 0.01 * float(np.hypot(w, h))
@@ -336,7 +350,7 @@ def select_boundary(
         if not refined:
             break
         merged = _merge_squares(squares, refined)
-        ranked2 = rank_hypotheses(pre, markers, merged, weights)
+        ranked2 = rank_hypotheses(pre, markers, merged, weights, sticker_quad)
         if ranked2[0].score <= best.score + 1e-4:
             break
         shift = _corner_shift(ranked2[0].polygon, best.polygon)

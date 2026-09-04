@@ -25,6 +25,14 @@ MARKER_ROLE_IDS: dict[str, int] = {
     "BOTTOM_LEFT": 3,
 }
 
+# One identical id printed on every adhesive corner sticker (spec §6, §11.2).
+# Distinct from the printed sheet's 0/1/2/3 so a mixed image is unambiguous.
+# The sticker also carries an L-bracket + wedge graphic pointing at the page
+# corner; the ArUco is a fixed physical size so the constellation scale gives a
+# page-size estimate.
+CORNER_STICKER_ID = 10
+CORNER_STICKER_ARUCO_MM = 14.0  # printed ArUco side on a standard corner sticker
+
 _DICT_NAMES = {
     name: getattr(cv2.aruco, name)
     for name in dir(cv2.aruco)

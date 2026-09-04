@@ -31,6 +31,30 @@ class DetectedMarker:
 
 
 @dataclass
+class CornerSticker:
+    """An adhesive corner sticker: an ArUco (id = CORNER_STICKER_ID) plus an
+    L-bracket + wedge graphic that points at the page corner (spec §11.2)."""
+
+    marker: DetectedMarker
+    outward: list[float]         # unit vector, marker centre -> page corner
+    corner_point: list[float]    # inferred page corner (bracket vertex, or extrapolated)
+    bracket_found: bool = False
+    inferred_role: str | None = None  # TOP_LEFT / TOP_RIGHT / BOTTOM_RIGHT / BOTTOM_LEFT
+
+
+@dataclass
+class PageSizeEstimate:
+    """Physical page size guessed from a known-size fiducial's scale (spec §11.2)."""
+
+    width_mm: float
+    height_mm: float
+    px_per_mm: float
+    method: str                       # "corner_stickers"
+    best_match: str | None = None     # "letter" / "a4" / "legal" / ...
+    match_error_mm: float = 0.0
+
+
+@dataclass
 class FiducialCandidate:
     """A marker-like region that may or may not be decodable.
 
@@ -111,6 +135,7 @@ class Capture:
     metadata_block: dict | None = None  # detected block geometry
     page_metadata: dict | None = None  # cell text parsed to PageMetadata (when OCR ran)
     sharpness: dict | None = None  # SharpnessReport: score, probes, blurry (spec §9.x)
+    page_size_estimate: dict | None = None  # PageSizeEstimate from corner stickers (spec §11.2)
     text_backend: str | None = None
     literal_assets: list[dict] = field(default_factory=list)  # escaped image regions (§16)
     detected_elements: list[dict] = field(default_factory=list)
