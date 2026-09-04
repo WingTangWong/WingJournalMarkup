@@ -165,12 +165,13 @@ function onAnalyze({ seq, width, height, buffer, markers, mode, gate }) {
     }
 
     progress("rectify");
-    // don't blow the page up past the pixels we actually captured
+    // normalized long side = the page's own pixel span in the grab (upscaling
+    // past that just interpolates), clamped to [MIN, MAX]
     const qLong = Math.max(
       dist2(quad[0], quad[1]), dist2(quad[1], quad[2]),
       dist2(quad[2], quad[3]), dist2(quad[3], quad[0]),
     );
-    const targetLong = Math.round(clampN(qLong * 1.15, MIN_LONG_PX, MAX_LONG_PX));
+    const targetLong = Math.round(clampN(qLong, MIN_LONG_PX, MAX_LONG_PX));
     const { mat: normalized, width: nw, height: nh } = V.rectify(cv, src, quad, targetLong);
     keep(normalized);
 

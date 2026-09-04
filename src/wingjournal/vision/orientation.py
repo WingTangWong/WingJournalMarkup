@@ -90,11 +90,12 @@ def _from_metadata_block(rectified: np.ndarray) -> Orientation | None:
     the one where a metadata block scores best near the top."""
 
     from wingjournal.recognition.metadata_block import detect_metadata_block
+    from wingjournal.vision.aruco import detect_markers
 
     best: tuple[int, float] | None = None
     for deg in (0, 90, 180, 270):
         img = rotate_upright(rectified, deg)
-        mb = detect_metadata_block(img)
+        mb = detect_metadata_block(img, markers=detect_markers(img))
         if mb is None:
             continue
         near_top = (mb.bbox[1] + mb.bbox[3]) < img.shape[0] * 0.5

@@ -24,24 +24,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _sheet_with_metadata() -> np.ndarray:
-    from wingjournal.recognition.metadata_block import detect_metadata_block
+def _sheet_with_metadata(dpi: int = 300) -> np.ndarray:
     from wingjournal.templates.geometry import compute_layout
     from wingjournal.templates.writing_sheet import render_writing_sheet
 
-    layout = compute_layout(dpi=200)
+    # 300 DPI ≈ a phone photo of a Letter page that fills the frame, so ingest
+    # takes its INTER_AREA downscale path (the real-world one) rather than a
+    # near-1:1 warp that neither matches a capture nor Tesseract's sweet spot.
+    layout = compute_layout(dpi=dpi)
     sheet = render_writing_sheet(layout)
-    block = detect_metadata_block(sheet)
-    assert block is not None
     # OCR-unambiguous, all-caps values (no 0/O or 1/l to trip Tesseract on a
-    # tiny 1/4" cell); the point is the pipeline + identity, not glyph accuracy
-    fills = {0: "RESEARCH", 1: "PAGE", 2: "AI"}
-    for i, cell in enumerate(block.row1_cells):
-        if i not in fills:
-            continue
-        x, y, w, h = (int(v) for v in cell)
-        cv2.putText(sheet, "#" + fills[i], (x + int(h * 0.9), y + int(h * 0.85)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2, cv2.LINE_AA)
+    # small cell); the point is the pipeline + identity, not glyph accuracy
+    fills = {"document_id": "RESEARCH", "page_id": "PAGE", "topic_tags": "AI"}
+    fs = dpi / 220.0
+    for field, value in fills.items():
+        x, y, w, h = (int(v) for v in layout.field_box[field])
+        cv2.putText(sheet, "#" + value, (x + int(h * 0.2), y + int(h * 0.8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), max(2, round(2 * fs)),
+                    cv2.LINE_AA)
     return sheet
 
 

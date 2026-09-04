@@ -37,8 +37,8 @@ from wingjournal.vision.hypothesis import ScoringWeights, select_boundary
 from wingjournal.vision.literal_box import detect_literal_assets, mask_literals
 from wingjournal.vision.orientation import resolve_orientation
 from wingjournal.vision.preprocess import preprocess
-from wingjournal.vision.rectify import rectify
-from wingjournal.vision.sharpness import assess as assess_sharpness
+from wingjournal.vision.rectify import adaptive_long_px, rectify
+from wingjournal.vision.sharpness import assess_capture
 
 
 @dataclass
@@ -82,6 +82,7 @@ def ingest_image(
     weights: ScoringWeights | None = None,
     recognizer: str = "auto",
     parse_body: bool = False,
+    reject_blurry: bool = False,
 ) -> IngestResult:
     from wingjournal.recognition.text import get_recognizer
     from wingjournal.vision.aruco import CORNER_STICKER_ID
@@ -107,7 +108,10 @@ def ingest_image(
     )
 
     quad = np.asarray(boundary.polygon, dtype=np.float32)
-    provisional, provisional_h = rectify(image, quad)
+    # normalized long side tracks the page's real pixel span in this capture
+    # rather than always upsampling to 1600 (spec §9.1)
+    target_long = adaptive_long_px(quad)
+    provisional, provisional_h = rectify(image, quad, target_long_px=target_long)
 
     # rotated corner stickers throw off the marker-id and text-baseline
     # orientation tiers (spec §7: sticker rotation is not authority), so drop
@@ -125,7 +129,9 @@ def ingest_image(
     )
 
     if orientation.degrees:
-        normalized, homography = rectify(image, quad, rotate_degrees=orientation.degrees)
+        normalized, homography = rectify(
+            image, quad, rotate_degrees=orientation.degrees, target_long_px=target_long
+        )
     else:
         normalized, homography = provisional, provisional_h
 
@@ -148,7 +154,9 @@ def ingest_image(
     literals = detect_literal_assets(normalized)
     for_parsing = mask_literals(normalized, literals) if literals else normalized
 
-    metadata_block = detect_metadata_block(for_parsing, marker_boxes=marker_boxes)
+    metadata_block = detect_metadata_block(
+        for_parsing, marker_boxes=marker_boxes, markers=norm_markers
+    )
 
     # sharpness: score the page at the known fiducials (spec §9.x). Blurry input
     # makes the thin ink unreadable; the live app gates auto-capture on this.
@@ -160,9 +168,18 @@ def ingest_image(
             RegistrationMark(center=[m[0], m[1]], size=m[2], acutance=m[3])
             for m in metadata_block.registration_marks
         ]
-    sharp = assess_sharpness(normalized, norm_markers, reg_marks)
+    # the deciding sharpness is on the raw capture at the fiducials, before
+    # rectify's upscale can smooth the blur away (spec §9.1)
+    capture_markers = [s.marker for s in stickers] if stickers else sheet_markers
+    sharp = assess_capture(image, capture_markers, normalized, norm_markers, reg_marks)
+
+    # the CLI analogue of the live app's "kick back to the viewfinder": with
+    # --reject-blurry, a soft capture still gets a full geometric record for
+    # inspection, but nothing is fed to OCR (spec §9.1)
+    recognize = rec.name != "none" and not (reject_blurry and sharp.blurry)
+
     page_metadata = None
-    if metadata_block is not None and rec.name != "none":
+    if metadata_block is not None and recognize:
         from wingjournal.recognition.metadata import read_metadata_block
 
         reading = read_metadata_block(for_parsing, metadata_block, rec)
@@ -170,7 +187,7 @@ def ingest_image(
         page_metadata["_confidence"] = reading.confidence
 
     elements: list[dict] = []
-    if parse_body and rec.name != "none":
+    if parse_body and recognize:
         from wingjournal.recognition.page_text import recognize_lines
         from wingjournal.recognition.parse import parse_lines
 
@@ -208,8 +225,15 @@ def ingest_image(
         f"boundary via {boundary.method} (score {boundary.confidence:.2f}); "
         f"orientation {orientation.degrees} deg via {orientation.method}"
         + (" (flip ambiguous)" if orientation.flip_ambiguous else "")
+        + f"; normalized to {normalized.shape[1]}x{normalized.shape[0]} px"
     )
-    capture.notes.append(sharp.summary() + (" - BLURRY, retake" if sharp.blurry else ""))
+    blurry_tail = ""
+    if sharp.blurry:
+        blurry_tail = (
+            " - BLURRY, recognition skipped (--reject-blurry)"
+            if reject_blurry else " - BLURRY, retake"
+        )
+    capture.notes.append(sharp.summary() + blurry_tail)
     if stickers:
         found = sum(s.bracket_found for s in stickers)
         note = f"{len(stickers)} corner sticker(s), {found} with a bracket"
@@ -261,6 +285,7 @@ def ingest_path(
     store=None,
     recognizer: str = "auto",
     parse_body: bool = False,
+    reject_blurry: bool = False,
 ) -> list[IngestResult]:
     src: CaptureSource = source_for(path, recursive=recursive)
     out_dir = Path(out_dir)
@@ -272,7 +297,7 @@ def ingest_path(
         result = ingest_image(
             name, image, dict_name=dict_name, source_type=src.source_type,
             raw_path=str(path), weights=weights, recognizer=recognizer,
-            parse_body=parse_body,
+            parse_body=parse_body, reject_blurry=reject_blurry,
         )
         norm_path = out_dir / "normalized" / f"{name}.png"
         cv2.imwrite(str(norm_path), result.normalized_image)

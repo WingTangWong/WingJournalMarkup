@@ -3,20 +3,24 @@ import cv2
 from wingjournal.recognition.metadata_block import detect_metadata_block
 from wingjournal.templates.geometry import compute_layout
 from wingjournal.templates.writing_sheet import render_writing_sheet
+from wingjournal.vision.aruco import detect_markers
 from wingjournal.vision.orientation import resolve_orientation
 from wingjournal.vision.preprocess import preprocess
 from wingjournal.vision.synthetic import warp_page
 
 
 def test_detect_block_on_writing_sheet():
-    mb = detect_metadata_block(render_writing_sheet(compute_layout(dpi=200)))
+    sheet = render_writing_sheet(compute_layout(dpi=200))
+    mb = detect_metadata_block(sheet, markers=detect_markers(sheet))
     assert mb is not None
     assert len(mb.row1_cells) == 3
     assert len(mb.row2_cells) == 4
     assert mb.confidence >= 0.9
-    # located from the registration marks, not the thin rules
-    assert mb.detection == "registration_marks"
-    assert len(mb.registration_marks) == 4
+    # located from the per-field ArUco anchors, not the thin rules
+    assert mb.detection == "field_anchors"
+    assert set(mb.field_cells) == {
+        "document_id", "page_id", "topic_tags", "left", "above", "below", "right",
+    }
     # block sits near the top of the page
     assert mb.bbox[1] < 0.35 * compute_layout(dpi=200).height_px
 
@@ -50,7 +54,7 @@ def test_detect_block_survives_the_pipeline():
     result = ingest_image("s", scene)
     mb = result.capture.metadata_block
     assert mb is not None
-    assert mb["detection"] == "registration_marks"
+    assert mb["detection"] == "field_anchors"
     assert len(mb["row1_cells"]) == 3
     # sharpness assessed and recorded (spec §9.x)
     assert result.capture.sharpness is not None

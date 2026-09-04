@@ -187,6 +187,15 @@ full-frame ~0.5 floor)*; documented numbers for the real-photo subset
 - ✅ Segmented metadata-block detection (`recognition/metadata_block.py`, spec
       §11): outer box, row divider, per-row cell grid (3 / 4) — geometry only;
       also drives orientation **Tier E** (2/1-marker orientation 0.6 → 0.8)
+- ✅ Per-field ArUco anchors for the metadata block (`make-sheet` template + the
+      `field_anchors` path in `recognition/metadata_block.py`, spec §11.3): ids
+      20–26, one per field, each with a light writing box to its right; the id
+      names the field so nothing is inferred. Registration marks + ruled lines
+      remain as fallbacks. New sheet also: 0.45" rows, 24 mm corner markers, a
+      dashed "recorded area" frame, no footer text.
+      ⬜ Port the `field_anchors` path to `MobileDeviceDemo/js/vision-core.js`.
+      ⬜ Hand-drawn ID box (spec §11.4): corner-square 3-bit code for the
+      markers-only / no-template case.
 - ✅ Registration-mark path for the metadata block (`vision/registration.py`,
       spec §11.1): four concentric-square marks → block quad from solid ink,
       ruled-line morphology as the fallback. Holds up where the hairline rules

@@ -58,7 +58,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         results = ingest_path(
             args.path, args.out, dict_name=args.dict, recursive=args.recursive,
             weights=weights, debug=args.debug, store=store, recognizer=args.recognizer,
-            parse_body=args.parse_body,
+            parse_body=args.parse_body, reject_blurry=args.reject_blurry,
         )
     finally:
         if store is not None:
@@ -258,6 +258,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument(
         "--debug", action="store_true", help="write vision overlays to <out>/debug"
     )
+    p_ingest.add_argument(
+        "--reject-blurry", action="store_true",
+        help="skip OCR on captures the sharpness gate flags blurry (spec §9.1)",
+    )
     p_ingest.set_defaults(func=_cmd_ingest)
 
     p_sheet = sub.add_parser("make-sheet", help="printable blank WJM writing sheet (PDF or image)")
@@ -269,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sheet.add_argument("--pages", type=int, default=1, help="number of sheets")
     p_sheet.add_argument("--dpi", type=int, default=300)
     p_sheet.add_argument("--dict", default=_DEFAULT_DICT, help="ArUco dictionary name")
-    p_sheet.add_argument("--marker-mm", type=float, default=18.0, help="marker size in mm")
+    p_sheet.add_argument("--marker-mm", type=float, default=24.0, help="corner marker size in mm")
     p_sheet.add_argument(
         "--margin-mm", type=float, default=_PRINT_MARGIN_MM,
         help="paper edge -> marker outer edge, in mm (default: 1/4in print margin)",

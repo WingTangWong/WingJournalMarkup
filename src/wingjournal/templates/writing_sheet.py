@@ -8,8 +8,15 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from wingjournal.templates._render import load_font, save_pdf, to_pil
-from wingjournal.templates.geometry import PRINT_MARGIN_MM, SheetLayout, compute_layout
-from wingjournal.vision.aruco import DEFAULT_DICT, generate_marker
+from wingjournal.templates.geometry import (
+    _DEFAULT_MARKER_MM,
+    METADATA_ROW1_FIELDS,
+    METADATA_ROW2_FIELDS,
+    PRINT_MARGIN_MM,
+    SheetLayout,
+    compute_layout,
+)
+from wingjournal.vision.aruco import DEFAULT_DICT, METADATA_FIELD_IDS, generate_marker
 
 _RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
@@ -17,6 +24,27 @@ _INK = (0, 0, 0)
 _CAPTION = (150, 150, 150)
 _RULE = (208, 208, 208)
 _FOOT = (140, 140, 140)
+_HINT = (200, 200, 200)
+
+
+def _dotted_rect(
+    draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int],
+    dash: int, gap: int, fill: tuple[int, int, int], width: int = 1,
+) -> None:
+    """A dashed rectangle (PIL has no dash support), drawn edge by edge."""
+
+    x0, y0, x1, y1 = box
+    step = dash + gap
+    # top & bottom
+    for x in range(x0, x1, step):
+        xe = min(x + dash, x1)
+        draw.line([x, y0, xe, y0], fill=fill, width=width)
+        draw.line([x, y1, xe, y1], fill=fill, width=width)
+    # left & right
+    for y in range(y0, y1, step):
+        ye = min(y + dash, y1)
+        draw.line([x0, y, x0, ye], fill=fill, width=width)
+        draw.line([x1, y, x1, ye], fill=fill, width=width)
 
 
 def _draw_registration_mark(draw: ImageDraw.ImageDraw, cx: int, cy: int, size: int) -> None:
@@ -28,32 +56,40 @@ def _draw_registration_mark(draw: ImageDraw.ImageDraw, cx: int, cy: int, size: i
         draw.rectangle([cx - r, cy - r, cx + r, cy + r], fill=fill)
 
 
-def _draw_metadata_block(draw: ImageDraw.ImageDraw, layout: SheetLayout) -> None:
+def _draw_metadata_block(
+    img: Image.Image, draw: ImageDraw.ImageDraw, layout: SheetLayout, dict_name: str
+) -> None:
+    """Each metadata field is an ArUco anchor (ids 20-26, one per field) with a
+    writing box to its right; the anchor's id names the field and its printed
+    size scales the box, so the reader never has to guess field boundaries from
+    thin rules (spec §11.3)."""
+
     x, y, w, h = layout.metadata_rect
     row_h = layout.metadata_row1_h
-    # heavier grid than a hairline — thin rules were the first thing lost in a
-    # dim or slightly soft photo (the registration marks below carry the rest)
-    lw = max(3, layout.dpi // 90)
-    cap_font = load_font(max(12, layout.dpi // 13))
+    box_lw = max(2, layout.dpi // 120)
+    cap_font = load_font(max(9, layout.dpi // 20))
 
-    draw.rectangle([x, y, x + w, y + h], outline=_INK, width=lw)
-    draw.line([x, y + row_h, x + w, y + row_h], fill=_INK, width=lw)
+    # faint outer frame + row divider for the eye; detection uses the marks
+    draw.rectangle([x, y, x + w, y + h], outline=_RULE, width=box_lw)
+    draw.line([x, y + row_h, x + w, y + row_h], fill=_RULE, width=box_lw)
 
-    for captions, y0 in (
-        (layout.row_captions[0], y),
-        (layout.row_captions[1], y + row_h),
-    ):
-        n = len(captions)
-        for c in range(1, n):
-            cx = x + round(w * c / n)
-            draw.line([cx, y0, cx, y0 + row_h], fill=_INK, width=lw)
-        pad = layout.dpi // 40
-        # keep captions clear of the corner registration marks
-        clear = int(layout.registration_px * 0.8) if layout.registration_px else pad
-        for c, label in enumerate(captions):
-            cx = x + round(w * c / n)
-            tx = cx + (clear if c == 0 else pad)
-            draw.text((tx, y0 + pad), label, font=cap_font, fill=_CAPTION)
+    rows = (
+        (METADATA_ROW1_FIELDS, layout.row_captions[0]),
+        (METADATA_ROW2_FIELDS, layout.row_captions[1]),
+    )
+    a = layout.field_anchor_px
+    for fields, captions in rows:
+        for name, label in zip(fields, captions, strict=True):
+            ax, ay = layout.field_anchor_xy[name]
+            marker = generate_marker(METADATA_FIELD_IDS[name], a, dict_name)
+            img.paste(Image.fromarray(marker).convert("RGB"), (ax, ay))
+
+            bx, by, bw, bh = layout.field_box[name]
+            # a light box: a writing guide for the eye that Otsu / Tesseract
+            # threshold away, so only the ink written inside reaches OCR
+            draw.rectangle([bx, by, bx + bw, by + bh], outline=_RULE, width=box_lw)
+            draw.text((bx + box_lw + 2, max(y + 1, by - layout.dpi // 18)),
+                      label, font=cap_font, fill=_CAPTION)
 
     if layout.registration_px:
         for cx, cy in layout.registration_xy:
@@ -90,29 +126,32 @@ def render_writing_sheet(
     if ruled:
         _draw_rules(draw, layout)
 
+    # faint dashed frame just outside the corner markers: everything inside is
+    # what a capture records, everything outside is not
+    from wingjournal.templates.geometry import mm_to_px
+
+    m = layout.margin_px
+    d = mm_to_px(1.5, layout.dpi)
+    _dotted_rect(
+        draw,
+        (m - d, m - d, layout.width_px - m + d, layout.height_px - m + d),
+        dash=mm_to_px(2.2, layout.dpi), gap=mm_to_px(2.0, layout.dpi),
+        fill=_HINT, width=max(1, layout.dpi // 300),
+    )
+
     for role, mid in layout.marker_ids.items():
         marker = generate_marker(mid, layout.marker_px, dict_name)
         img.paste(Image.fromarray(marker).convert("RGB"), layout.marker_xy[role])
 
-    _draw_metadata_block(draw, layout)
-
-    # Informational text is centred horizontally and clear of the non-printable
-    # border: the footer rides the bottom-marker row (nothing else is there); the
-    # page label goes in the strip below the top markers, above the body, since
-    # the metadata block now occupies the top-marker row.
-    def _centred_text(text: str, font, y_centre: int) -> None:
-        tb = draw.textbbox((0, 0), text, font=font)
-        tx = (layout.width_px - (tb[2] - tb[0])) // 2
-        draw.text((tx, y_centre - (tb[3] - tb[1]) // 2 - tb[1]), text, font=font, fill=_FOOT)
-
-    foot = (
-        f"Wing Journal Markup - writing sheet - {dict_name} - "
-        f"marker IDs 0/1/2/3 = TL/TR/BR/BL"
-    )
-    bl_y = layout.marker_xy["BOTTOM_LEFT"][1]
-    _centred_text(foot, load_font(max(11, layout.dpi // 22)), bl_y + layout.marker_px // 2)
+    _draw_metadata_block(img, draw, layout, dict_name)
 
     if page_label:
+        def _centred_text(text: str, font, y_centre: int) -> None:
+            tb = draw.textbbox((0, 0), text, font=font)
+            tx = (layout.width_px - (tb[2] - tb[0])) // 2
+            draw.text((tx, y_centre - (tb[3] - tb[1]) // 2 - tb[1]),
+                      text, font=font, fill=_FOOT)
+
         top_band = layout.margin_px + layout.marker_px
         _centred_text(
             page_label, load_font(max(11, layout.dpi // 22)),
@@ -128,7 +167,7 @@ def build_writing_sheet(
     pages: int = 1,
     dpi: int = 300,
     dict_name: str = DEFAULT_DICT,
-    marker_mm: float = 18.0,
+    marker_mm: float = _DEFAULT_MARKER_MM,
     margin_mm: float = PRINT_MARGIN_MM,
     ruled: bool = False,
 ) -> Path:

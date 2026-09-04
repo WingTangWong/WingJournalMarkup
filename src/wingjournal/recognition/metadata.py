@@ -52,8 +52,14 @@ def read_metadata_block(
             return region.text
         return ""
 
-    row1 = [cell_text(b) for b in _pad(block.row1_cells, 3)]
-    row2 = [cell_text(b) for b in _pad(block.row2_cells, 4)]
+    if block.field_cells:
+        # the field-anchor path knows exactly which box is which field
+        fc = block.field_cells
+        row1 = [cell_text(fc.get(f)) for f in ("document_id", "page_id", "topic_tags")]
+        row2 = [cell_text(fc.get(f)) for f in ("left", "above", "below", "right")]
+    else:
+        row1 = [cell_text(b) for b in _pad(block.row1_cells, 3)]
+        row2 = [cell_text(b) for b in _pad(block.row2_cells, 4)]
     return MetadataReading(
         metadata=parse_metadata_cells(row1, row2),
         row1_text=row1,

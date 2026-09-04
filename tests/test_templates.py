@@ -18,13 +18,14 @@ def test_layout_marker_positions_inside_page():
 
 def test_writing_sheet_markers_are_detectable():
     sheet = render_writing_sheet(compute_layout(dpi=200))
-    markers = detect_markers(sheet)
-    assert {m.marker_id for m in markers} == {0, 1, 2, 3}
+    ids = {m.marker_id for m in detect_markers(sheet)}
+    assert {0, 1, 2, 3} <= ids                      # the four page corners
+    assert {20, 21, 22, 23, 24, 25, 26} <= ids      # the seven field anchors
 
 
 def test_ruled_sheet_still_detectable():
     sheet = render_writing_sheet(compute_layout(dpi=200), ruled=True)
-    assert len(detect_markers(sheet)) == 4
+    assert {0, 1, 2, 3} <= {m.marker_id for m in detect_markers(sheet)}
 
 
 def test_build_writing_sheet_pdf_multipage(tmp_path):
@@ -40,7 +41,7 @@ def test_build_writing_sheet_png(tmp_path):
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     img = cv2.imread(str(out))
     assert img is not None
-    assert {m.marker_id for m in detect_markers(img)} == {0, 1, 2, 3}
+    assert {0, 1, 2, 3} <= {m.marker_id for m in detect_markers(img)}
 
 
 def test_build_writing_sheet_png_rejects_multipage(tmp_path):

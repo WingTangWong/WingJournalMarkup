@@ -33,6 +33,23 @@ MARKER_ROLE_IDS: dict[str, int] = {
 CORNER_STICKER_ID = 10
 CORNER_STICKER_ARUCO_MM = 14.0  # printed ArUco side on a standard corner sticker
 
+# Per-field metadata anchors (spec §11.3): one small ArUco immediately left of
+# each metadata field's box. The id says *which* field the box is and its
+# printed size gives the box's scale, so the detector no longer has to guess
+# field boundaries from thin ruled lines. Ids 20-26, distinct from the corner
+# markers (0-3) and the corner sticker (10).
+METADATA_FIELD_IDS: dict[str, int] = {
+    "document_id": 20,
+    "page_id": 21,
+    "topic_tags": 22,
+    "left": 23,
+    "above": 24,
+    "below": 25,
+    "right": 26,
+}
+FIELD_BY_MARKER_ID: dict[int, str] = {v: k for k, v in METADATA_FIELD_IDS.items()}
+METADATA_FIELD_ANCHOR_MM = 8.0  # printed anchor side (~1/3 of an 24 mm corner)
+
 _DICT_NAMES = {
     name: getattr(cv2.aruco, name)
     for name in dir(cv2.aruco)

@@ -15,8 +15,28 @@ import numpy as np
 # default normalized-page long side, in pixels (~145 DPI for US Letter)
 TARGET_LONG_PX = 1600
 
+# adaptive normalized long side (spec §9.1): never below MIN, never far past the
+# page's real pixel span in the capture (warpPerspective's cubic upscale past
+# that just interpolates), capped at MAX so the buffer stays manageable.
+MIN_LONG_PX = 1600
+MAX_LONG_PX = 2800
+
 # plausible page aspect ratios (long / short): Letter 1.294, A4 1.414
 _ASPECT_RANGE = (1.15, 1.6)
+
+
+def adaptive_long_px(
+    quad: np.ndarray,
+    lo: int = MIN_LONG_PX,
+    hi: int = MAX_LONG_PX,
+) -> int:
+    """Target long side = the page's own pixel span in the raw capture, clamped
+    to ``[lo, hi]``. Upsampling past the captured span only interpolates;
+    downsampling far below it throws away readable ink. Mirrors
+    ``MobileDeviceDemo/js/worker.js``."""
+
+    width, height = observed_size(quad)
+    return int(np.clip(round(max(width, height)), lo, hi))
 
 
 def _edge(a: np.ndarray, b: np.ndarray) -> float:
@@ -77,8 +97,21 @@ def rectify(
     dst = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
     homography = cv2.getPerspectiveTransform(quad, dst)
 
-    rot, (w, h) = _rotation_matrix(rotate_degrees, w, h)
+    rot, (w2, h2) = _rotation_matrix(rotate_degrees, w, h)
     homography = rot @ homography
 
-    warped = cv2.warpPerspective(image, homography, (w, h), flags=cv2.INTER_CUBIC)
+    # INTER_AREA is the right resampler when we're shrinking the page (it
+    # box-filters instead of aliasing); INTER_CUBIC's negative lobes overshoot
+    # hard ink edges near 1:1 and Tesseract's threshold then mangles them, so
+    # only reach for it on a real upscale.
+    src_long = max(observed_size(quad))
+    ratio = max(w, h) / src_long if src_long else 1.0
+    if ratio < 0.98:
+        interp = cv2.INTER_AREA
+    elif ratio > 1.25:
+        interp = cv2.INTER_CUBIC
+    else:
+        interp = cv2.INTER_LINEAR
+
+    warped = cv2.warpPerspective(image, homography, (w2, h2), flags=interp)
     return warped, homography

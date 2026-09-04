@@ -461,16 +461,18 @@ small dark square at the centre:
 ◎═══╧═══╧═══╧═══════◎
 ```
 
-Detection reads the block two ways, in order:
+Detection reads the block three ways, in order:
 
-1. **registration marks** — locate the four marks (nested dark→bright→dark
-   contours, roughly square and concentric), order them TL/TR/BR/BL, and take
-   that quad as the block. The cell grid follows from segment order. Solid ink,
-   so this survives the dim or soft photos that erase the thin rules.
-2. **ruled lines** — the morphology / projection fallback, for sheets printed
-   before the marks, hand-drawn blocks, or overlays.
+1. **field anchors** (§11.3) — the per-field ArUco markers (ids 20–26). Each
+   field's box is the span between its anchor and the next; the id names the
+   field outright, so there is nothing to infer. Primary path for current sheets.
+2. **registration marks** — locate the four concentric-square marks, order them
+   TL/TR/BR/BL, take that quad as the block; the cell grid follows from segment
+   order. For sheets printed with the marks but no anchors.
+3. **ruled lines** — the morphology / projection fallback, for sheets printed
+   before either, hand-drawn blocks, or overlays.
 
-The marks also serve as sharpness probes (§9.1).
+The marks (and the anchors) also serve as sharpness probes (§9.1).
 
 ### 11.2 Adhesive Corner Stickers
 
@@ -511,6 +513,70 @@ PageSizeEstimate(
 This is a hint, not a measurement — good on a flat capture, rough under strong
 perspective; ``match_error_mm`` carries the uncertainty and ``best_match`` is
 ``None`` when it is too ambiguous to name.
+
+### 11.3 Per-Field ArUco Anchors
+
+The printed sheet puts a small ArUco marker immediately left of every metadata
+field's box — one reserved id per field:
+
+| id | field         | id | field   |
+|----|---------------|----|---------|
+| 20 | `document_id` | 24 | `above` |
+| 21 | `page_id`     | 25 | `below` |
+| 22 | `topic_tags`  | 26 | `right` |
+| 23 | `left`        |    |         |
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ [20]  DOCUMENT ID box   [21]  PAGE ID box   [22]  TOPIC box  │
+│ [23]  LEFT box   [24]  ABOVE box   [25]  BELOW box  [26] RIGHT│
+└─────────────────────────────────────────────────────────────┘
+```
+
+The anchor is a fixed physical size (`METADATA_FIELD_ANCHOR_MM`, ~8 mm — roughly
+a third of a corner marker). Detection:
+
+1. find the anchors on the normalized page (ordinary ArUco detection);
+2. group them into two rows by centre-y, sort each row by x;
+3. each field's OCR box is the gap from its anchor's right edge to the next
+   anchor's left edge (or the block's right extent), vertically aligned with the
+   anchor.
+
+Because the id *is* the field, a missing or unreadable anchor drops exactly one
+field — the rest are unaffected — and there is no caption text inside the box to
+bleed into OCR. The printed box outline is light grey (a writing guide the Otsu
+/ Tesseract threshold discards), the human caption sits *above* the box.
+
+### 11.4 Hand-Drawn ID Box
+
+For a page that has only the corner ArUco marks (or corner stickers) and no
+printed metadata block, an ID is added **by hand**: draw a solid-outline box,
+write the id inside, and fill in small squares at its corners to say which
+relation the id encodes.
+
+The **upper-left** corner square is always filled — it marks the box as an ID
+box and fixes its orientation. The other three corners (upper-right `UR`,
+lower-right `LR`, lower-left `LL`) are a 3-bit code:
+
+| UR | LR | LL | meaning                                    |
+|----|----|----|-------------------------------------------|
+|    |    |    | `document_id` — the id is this page's document |
+| ■  |    |    | `above` — id of the page above this one    |
+|    |    | ■  | `left` — id of the page to the left        |
+| ■  | ■  |    | `right` — id of the page to the right      |
+|    | ■  | ■  | `below` — id of the page below             |
+| ■  | ■  | ■  | `page_id` — this page's own id             |
+
+```text
+■━━━━━━━━━━□        ■━━━━━━━━━━■        ■━━━━━━━━━━■
+┃ #Research ┃      ┃  #P017    ┃      ┃  #P018    ┃
+□━━━━━━━━━━□        ■━━━━━━━━━━■        □━━━━━━━━━━■
+  document_id         page_id            right
+```
+
+`LR`-only and `UR`+`LL` are undefined (reserved). A hand-drawn box carries one
+field; a page may have several. Topic tags have no hand-drawn form — write them
+as ordinary `#tags` in the body.
 
 Schema:
 
