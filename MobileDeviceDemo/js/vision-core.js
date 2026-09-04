@@ -668,12 +668,18 @@
     return orderPoints(ROLE_ORDER.map((r) => pts[r]));
   }
 
-  // corner_sticker._find_bracket — wedge tip = the page corner
+  // corner_sticker._find_bracket — wedge tip = the page corner; falls back to
+  // the ArUco's own outer corner when the sticker was rotated the wrong way
   function findWedgeTip(C, gray, marker, outward) {
     const h = gray.rows;
     const w = gray.cols;
     const center = marker.center;
     const side = markerSide(marker);
+    const proj1 = (p) => (p[0] - center[0]) * outward[0] + (p[1] - center[1]) * outward[1];
+    const arucoOuter = marker.corners.reduce((a, b) => (proj1(b) > proj1(a) ? b : a));
+    const reach = proj1(arucoOuter);
+    const estimate = [arucoOuter[0] + outward[0] * 0.7 * side, arucoOuter[1] + outward[1] * 0.7 * side];
+
     const px = center[0] + outward[0] * side;
     const py = center[1] + outward[1] * side;
     const r = Math.floor(0.9 * side);
@@ -681,15 +687,13 @@
     const x1 = Math.min(w, Math.floor(px + r));
     const y0 = Math.max(0, Math.floor(py - r));
     const y1 = Math.min(h, Math.floor(py + r));
-    const fb = [center[0] + outward[0] * 1.05 * side * Math.SQRT2,
-      center[1] + outward[1] * 1.05 * side * Math.SQRT2];
-    if (x1 - x0 < 6 || y1 - y0 < 6) return [fb, false];
+    if (x1 - x0 < 6 || y1 - y0 < 6) return [estimate, false];
 
     const roi = gray.roi(new C.Rect(x0, y0, x1 - x0, y1 - y0));
     const ink = new C.Mat();
     C.threshold(roi, ink, 0, 255, C.THRESH_BINARY_INV | C.THRESH_OTSU);
-    // erase the marker footprint
-    const poly = C.matFromArray(4, 1, C.CV_32SC2, marker.corners.flatMap(([x, y]) => [Math.round(x - x0), Math.round(y - y0)]));
+    const poly = C.matFromArray(4, 1, C.CV_32SC2,
+      marker.corners.flatMap(([x, y]) => [Math.round(x - x0), Math.round(y - y0)]));
     const vec = new C.MatVector();
     vec.push_back(poly);
     C.fillPoly(ink, vec, new C.Scalar(0));
@@ -707,7 +711,8 @@
       }
     }
     roi.delete(); ink.delete(); poly.delete(); vec.delete();
-    if (n < Math.max(20, 0.02 * (x1 - x0) * (y1 - y0))) return [fb, false];
+    if (n < Math.max(20, 0.02 * (x1 - x0) * (y1 - y0))) return [estimate, false];
+    if (bestProj < 1.1 * reach) return [estimate, false];
     return [bestTip, true];
   }
 

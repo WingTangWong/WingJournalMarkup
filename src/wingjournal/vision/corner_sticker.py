@@ -44,34 +44,46 @@ def _marker_side(m: DetectedMarker) -> float:
 def _find_bracket(
     gray: np.ndarray, marker: DetectedMarker, outward: np.ndarray
 ) -> tuple[np.ndarray, bool]:
-    """(corner_point, bracket_found). The wedge tip — the ink furthest along
-    ``outward`` in a box just outside the marker — is the page corner."""
+    """(corner_point, bracket_found).
+
+    Best case: the wedge tip — the ink furthest along ``outward`` just outside
+    the marker — is the page corner. When the sticker was stuck on rotated the
+    wrong way its wedge no longer points at the corner, so fall back to the
+    marker's own outermost corner (a real detected point, still near the page
+    corner and rotation-independent — spec §7)."""
 
     h, w = gray.shape[:2]
     center = np.asarray(marker.center, dtype=np.float32)
+    corners = np.asarray(marker.corners, dtype=np.float32)
     side = _marker_side(marker)
+    aruco_outer = corners[int(np.argmax((corners - center) @ outward))]
+    reach = float((aruco_outer - center) @ outward)
+    # geometric guess: past the ArUco outer corner by the known sticker layout
+    # (wedge vertex ~ 0.7 marker-widths further out)
+    estimate = aruco_outer + outward * (0.7 * side)
+
     probe = center + outward * side
     r = int(0.9 * side)
     x0, x1 = max(0, int(probe[0] - r)), min(w, int(probe[0] + r))
     y0, y1 = max(0, int(probe[1] - r)), min(h, int(probe[1] + r))
-
-    fallback = center + outward * (1.05 * side * np.sqrt(2))
     if x1 - x0 < 6 or y1 - y0 < 6:
-        return fallback, False
+        return estimate, False
 
     region = gray[y0:y1, x0:x1]
     _, ink = cv2.threshold(region, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-    # drop the marker's own footprint
-    mc = np.asarray(marker.corners, dtype=np.float32) - [x0, y0]
-    cv2.fillConvexPoly(ink, mc.astype(np.int32), 0)
+    cv2.fillConvexPoly(ink, (corners - [x0, y0]).astype(np.int32), 0)
 
     ys, xs = np.nonzero(ink)
     if xs.size < max(20, 0.02 * ink.size):
-        return fallback, False
+        return estimate, False
 
     pts = np.stack([xs + x0, ys + y0], axis=1).astype(np.float32)
     proj = (pts - center) @ outward
     tip = pts[int(np.argmax(proj))]
+    # a real wedge reaches clearly past the ArUco's own outer corner; a stray
+    # blob from a wrong-way-rotated sticker does not (spec §7)
+    if float(proj.max()) < 1.1 * reach:
+        return estimate, False
     return tip, True
 
 

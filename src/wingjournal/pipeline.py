@@ -108,7 +108,21 @@ def ingest_image(
 
     quad = np.asarray(boundary.polygon, dtype=np.float32)
     provisional, provisional_h = rectify(image, quad)
-    orientation = resolve_orientation(pre, markers, boundary.polygon, rectified=provisional)
+
+    # rotated corner stickers throw off the marker-id and text-baseline
+    # orientation tiers (spec §7: sticker rotation is not authority), so drop
+    # them before resolving: mask their footprints and pass only sheet markers
+    orient_pre, orient_markers = pre, markers
+    if stickers:
+        masked = image.copy()
+        for s in stickers:
+            x, y, mw, mh = cv2.boundingRect(np.asarray(s.marker.corners, dtype=np.float32))
+            pad = int(0.9 * max(mw, mh))
+            masked[max(0, y - pad):y + mh + pad, max(0, x - pad):x + mw + pad] = 255
+        orient_pre, orient_markers = preprocess(masked), sheet_markers
+    orientation = resolve_orientation(
+        orient_pre, orient_markers, boundary.polygon, rectified=provisional
+    )
 
     if orientation.degrees:
         normalized, homography = rectify(image, quad, rotate_degrees=orientation.degrees)

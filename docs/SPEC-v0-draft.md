@@ -468,9 +468,11 @@ photo-corner **wedge** (its right-angle vertex tucks into the paper corner) and
 a thin edge rule, both pointing the same way. ``make-stickers`` prints a grid of
 them; the user rotates each 90° for its corner.
 
-Because the stickers are identical, the id is not the corner — geometry (the
-constellation) and the wedge direction give the role. Detection yields, per
-sticker:
+Because the stickers are identical, the id is not the corner — the constellation
+geometry gives the role, so a sticker stuck on rotated the wrong way (§7) still
+resolves correctly. Its wedge then no longer points at the corner, so detection
+falls back to the sticker's own ArUco outer corner (a real detected point, near
+the page corner and rotation-independent). Detection yields, per sticker:
 
 ```python
 CornerSticker(
