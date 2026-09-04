@@ -54,39 +54,33 @@ also gives you HTTPS without certs.
 
 | Where | What |
 |---|---|
-| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection + a fast frame-sharpness score; on capture: **score the raw grab at the fiducials (gate — a soft auto-grab is rejected)** → rectify → literal-region detect + mask → metadata-block detect (registration marks, ruled-line fallback) → sharpness at the fiducials → text-line segmentation. Keeps the 11 MB compile and all pixel work off the UI thread. |
+| **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; on capture: pick the sharpest frame of the burst (Tenengrad) → rectify to a fixed 2550×3300 (8.5×11 @ 300 DPI) canvas → literal-region detect + mask → metadata-block detect → sharpness (informational) → text-line segmentation. Keeps the 11 MB compile and all pixel work off the UI thread. |
 | **Tesseract.js** (its own worker, spawned from the main thread) | OCR of the metadata cells and each body line off the rectified page. |
 | **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR → parse. |
 | **`js/wjm-parse.js`** | The WJM grammar + element parser (bullets, tags, temporal, references, contacts). Pure text, no dependencies. |
 
 ### The capture flow
 
-The live feed only gets the **lock**; the actual analysis runs on a full-frame
-grab, and a soft grab bounces straight back to the feed to re-focus.
+See [`SCANNER.md`](SCANNER.md) for the full state machine. **Phase A** (current):
 
-1. On start, the track is pushed to the sensor's max resolution +
-   continuous autofocus (`applyConstraints`; Safari/iOS has no
-   `ImageCapture.takePhoto()`, so the "photo" is the best frame the stream gives).
-2. Camera → hidden ≤900 px canvas; `getImageData` buffer transferred to the
-   worker ~14×/s → `aruco_ArucoDetector` (`DICT_4X4_50`, sub-pixel corners).
-   Four id-`10` markers → **sticker mode**: roles from geometry + the wedge
-   direction, page corners from the wedge tips, page size from the sticker scale.
-3. Guide test on the main thread: every marker's four corners inside the guide
-   rectangle, and large enough (rejects "too far"). The guide brackets go
-   **red → orange → yellow → green** as the lock firms up.
-4. All of ids 0/1/2/3 inside, the live frame sharp enough, and stable for 450 ms
-   → grab the **full-resolution frame** and hand it to the worker (toggle
-   **Auto** off for manual only).
-5. Worker scores the raw grab at the fiducials *before* rectifying. If any
-   fiducial is soft the grab is **rejected** — the app coaches ("soft at top
-   left — move closer & hold steady", the soft markers flash red) and drops back
-   to step 3. Manual shutter skips this gate and always produces a report.
-6. On a sharp grab the worker rectifies (page quad from the *outer* corner of
-   each marker, `warpPerspective`, aspect clamped `[1.15, 1.6]`; long side scales
-   with the page's real pixel span, `1600–2800 px`) and returns the normalized
-   page + the metadata-block grid + the body-line boxes.
-7. Main thread OCRs each cell and line, runs `wjm-parse`, and assembles the
-   capture record.
+1. On start, the track is pushed to the sensor's max resolution + continuous
+   autofocus (`applyConstraints`; Safari/iOS has no `ImageCapture.takePhoto()`).
+2. Camera → hidden ≤900 px canvas → worker ~14×/s → `aruco_ArucoDetector`
+   (`DICT_4X4_50`). Three-plus id-`10` markers → **sticker mode**.
+3. Guide test on the main thread: every marker's corners inside the guide, large
+   enough. Guide brackets go **red → orange → yellow → green** as the lock firms.
+4. All four corner ids in the guide, stable for 450 ms → **burst** of 6 frames
+   over 500 ms handed to the worker. **No sharpness gate** — auto-capture fires
+   on the lock alone (toggle **Auto** off for manual).
+5. Worker scores each burst frame (Tenengrad), keeps the sharpest, rectifies it
+   into the fixed 2550×3300 canvas (INTER_AREA when shrinking, LINEAR near 1:1 —
+   never CUBIC), and returns the page + metadata grid + body-line boxes. The
+   review screen reports the focus score; nothing is rejected.
+6. Main thread OCRs each cell and line, runs `wjm-parse`, assembles the record.
+
+**Not yet built (phases B/C):** close-up re-shots of soft detail areas composited
+into the canvas, and a re-assess loop. Until then the base is one video frame and
+detail is limited — the review screen says so.
 
 ### The captured report
 

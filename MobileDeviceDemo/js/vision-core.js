@@ -140,18 +140,48 @@
    * Perspective-normalize the page.
    * @returns {{mat: cv.Mat, width:number, height:number}} caller deletes mat
    */
-  function rectify(cv, srcMat, quad, targetLong) {
-    const [w, h] = outputSize(quad, targetLong);
+  function rectify(cv, srcMat, quad, targetLong, fixedSize) {
+    const [w, h] = fixedSize
+      ? [Math.max(1, Math.round(fixedSize[0])), Math.max(1, Math.round(fixedSize[1]))]
+      : outputSize(quad, targetLong);
     const src = cv.matFromArray(4, 1, cv.CV_32FC2, quad.flat());
     const dst = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, w - 1, 0, w - 1, h - 1, 0, h - 1]);
     const Hm = cv.getPerspectiveTransform(src, dst);
+    // shrink -> INTER_AREA (box filter, no aliasing); near 1:1 or upscale ->
+    // INTER_LINEAR. Never INTER_CUBIC: its negative lobes ring hard ink edges
+    // and the downstream threshold / OCR then mangles the overshoot ("chunky").
+    const srcLong = Math.max(
+      dist(quad[0], quad[1]), dist(quad[1], quad[2]),
+      dist(quad[2], quad[3]), dist(quad[3], quad[0]),
+    );
+    const AREA = typeof cv.INTER_AREA === "number" ? cv.INTER_AREA : 3;
+    const LIN = typeof cv.INTER_LINEAR === "number" ? cv.INTER_LINEAR : 1;
     const out = new cv.Mat();
     cv.warpPerspective(
       srcMat, out, Hm, new cv.Size(w, h),
-      typeof cv.INTER_CUBIC === "number" ? cv.INTER_CUBIC : 1,
+      Math.max(w, h) < 0.98 * srcLong ? AREA : LIN,
     );
     src.delete(); dst.delete(); Hm.delete();
     return { mat: out, width: w, height: h };
+  }
+
+  // Tenengrad focus score: mean Sobel gradient magnitude over `gray` (optionally
+  // a [x,y,w,h] roi). Higher = sharper. Only meaningful when ranking frames of
+  // the same scene against each other.
+  function tenengrad(cv, gray, roi) {
+    let g = gray;
+    let owns = false;
+    if (roi) { g = gray.roi(new cv.Rect(roi[0], roi[1], roi[2], roi[3])); owns = true; }
+    const gx = new cv.Mat();
+    const gy = new cv.Mat();
+    const mag = new cv.Mat();
+    cv.Sobel(g, gx, cv.CV_32F, 1, 0, 3);
+    cv.Sobel(g, gy, cv.CV_32F, 0, 1, 3);
+    cv.magnitude(gx, gy, mag);
+    const s = cv.mean(mag)[0];
+    gx.delete(); gy.delete(); mag.delete();
+    if (owns) g.delete();
+    return s;
   }
 
   // ===================================================================
@@ -823,7 +853,7 @@
 
   root.WJMVision = {
     ROLE_BY_ID, ROLE_ORDER, TARGET_LONG_PX, CORNER_STICKER_ID,
-    hasAruco, MarkerDetector, pageQuadFromMarkers, outputSize, rectify, dist,
+    hasAruco, MarkerDetector, pageQuadFromMarkers, outputSize, rectify, tenengrad, dist,
     detectMetadataBlock, segmentLines, detectLiteralAssets, maskLiterals,
     detectRegistrationMarks, marksToQuad, laplacianVariance, assessSharpness, edgeAcutance,
     detectCornerStickers, stickerQuad, estimatePageSize,

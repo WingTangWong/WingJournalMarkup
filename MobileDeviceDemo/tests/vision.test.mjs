@@ -89,6 +89,24 @@ cv.onRuntimeInitialized = () => {
     mat.delete();
   });
 
+  t("rectify -> fixedSize gives an exact canvas (8.5x11 @ 300)", () => {
+    const det = new V.MarkerDetector(cv);
+    const quad = V.pageQuadFromMarkers(det.detect(sheet));
+    const { mat, width, height } = V.rectify(cv, sheet, quad, null, [2550, 3300]);
+    assert.equal(width, 2550);
+    assert.equal(height, 3300);
+    mat.delete();
+  });
+
+  t("tenengrad -> sharp scene scores higher than a blurred one", () => {
+    const blur = new cv.Mat();
+    cv.GaussianBlur(sheet, blur, new cv.Size(0, 0), 3);
+    const sharpScore = V.tenengrad(cv, sheet);
+    const blurScore = V.tenengrad(cv, blur);
+    assert.ok(sharpScore > blurScore * 1.5, `${sharpScore} vs ${blurScore}`);
+    blur.delete();
+  });
+
   t("detectRegistrationMarks -> the four corner marks", () => {
     const marks = V.detectRegistrationMarks(cv, sheet, [0, 0, W, 260], null);
     assert.equal(marks.length, 4, "got " + marks.length);

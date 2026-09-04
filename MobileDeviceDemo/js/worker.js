@@ -10,16 +10,15 @@
  *   ←    { type:"ready", hasAruco } | { type:"error", message }
  *   main → { type:"detect",  seq, width, height, buffer }         // live frame, RGBA transferred
  *   ←    { type:"markers",  seq, markers }
- *   main → { type:"analyze", seq, width, height, buffer, markers, mode, gate } // full-res capture, RGBA
+ *   main → { type:"analyze", seq, frames:[{buffer,width,height}], markers, mode } // burst, RGBA transferred
  *   ←    { type:"progress", seq, stage }
  *   ←    { type:"analyzed", seq, geometry, rectified:{buffer,width,height} }
- *   ←    { type:"analyzed", seq, rejected:"blurry", sharpness, soft }  // gate:true only
  *   ←    { type:"analyzed", seq, error }
  *
- * When `gate` is set (auto-capture), the full-res grab is scored at the
- * fiducials *before* rectify; a blurry grab is bounced back with `rejected` so
- * the live loop can coach "move closer / hold steady" instead of showing a
- * soft page (spec §9.1).
+ * SCANNER.md phase A: the burst is scored frame-by-frame (Tenengrad), the
+ * sharpest is kept and rectified into a fixed 8.5x11 @ 300 DPI canvas. There is
+ * no accept/reject gate — we always return the best of what we got; the review
+ * screen reports how sharp it is.
  *
  * The chain mirrors wingjournal.pipeline.ingest_image from perspective
  * normalization onward (markers already give the page frame + orientation):
@@ -32,14 +31,8 @@ let cv = null;
 let V = null;   // WJMVision
 let detector = null;
 
-// normalized long side: never below this, never far past the page's real pixel
-// span in the grab (upscaling just interpolates), capped so the RGBA buffer we
-// ship back stays sane on a phone.
-const MIN_LONG_PX = 1600;
-const MAX_LONG_PX = 2800;
-
-const dist2 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
-const clampN = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+// the fixed rectified canvas: 8.5 x 11 in at 300 DPI (SCANNER.md)
+const LETTER_PX = [2550, 3300];
 
 self.onmessage = (e) => {
   const msg = e.data;
@@ -133,46 +126,54 @@ function onDetect({ seq, width, height, buffer }) {
   post({ type: "markers", seq, markers, sharpness, mode });
 }
 
-function onAnalyze({ seq, width, height, buffer, markers, mode, gate }) {
+function onAnalyze({ seq, frames, markers, mode }) {
   const progress = (stage) => post({ type: "progress", seq, stage });
   const trash = [];
   const keep = (m) => { trash.push(m); return m; };
   try {
-    const src = keep(matFromBuffer(buffer, width, height));
-    const graySrc = keep(grayOf(src));
+    if (!frames || !frames.length) {
+      return post({ type: "analyzed", seq, error: "no frames in the burst" });
+    }
 
-    let quad;
+    // --- pick the sharpest frame of the burst (Tenengrad), drop the rest ---
+    progress("choosing the sharpest frame");
+    const scores = [];
+    let best = null; // { src, gray, score, index }
+    frames.forEach((f, i) => {
+      const src = matFromBuffer(f.buffer, f.width, f.height);
+      const gray = grayOf(src);
+      const score = V.tenengrad(cv, gray);
+      scores.push(Math.round(score * 100) / 100);
+      if (!best || score > best.score) {
+        if (best) { best.src.delete(); best.gray.delete(); }
+        best = { src, gray, score, index: i };
+      } else {
+        src.delete(); gray.delete();
+      }
+    });
+    const src = keep(best.src);
+    const graySrc = keep(best.gray);
+    const fw = frames[best.index].width;
+    const fh = frames[best.index].height;
+
+    // --- page frame from the winning frame's own fiducials ---
     let stickerMode = mode === "stickers";
-    let shotMarkers = markers || [];
-    if (stickerMode) {
-      const stkm = detector.detect(graySrc).filter((m) => m.id === V.CORNER_STICKER_ID);
-      const stk = V.detectCornerStickers(cv, graySrc, stkm);
-      quad = V.stickerQuad(stk);
-      shotMarkers = stk.map((s) => ({ id: V.CORNER_STICKER_ID, role: s.role, corners: s.marker.corners }));
+    let quad;
+    const all = detector.detect(graySrc);
+    const sheet = all.filter((m) => m.id >= 0 && m.id <= 3);
+    if (stickerMode || (sheet.length < 3 && all.some((m) => m.id === V.CORNER_STICKER_ID))) {
+      stickerMode = true;
+      const stkm = all.filter((m) => m.id === V.CORNER_STICKER_ID);
+      quad = V.stickerQuad(V.detectCornerStickers(cv, graySrc, stkm));
     } else {
-      quad = V.pageQuadFromMarkers(markers || []);
+      quad = V.pageQuadFromMarkers(sheet.length >= 3 ? sheet : (markers || []));
     }
     if (!quad) return post({ type: "analyzed", seq, error: "need all four corner fiducials to normalize the page" });
 
-    // score the raw grab at the fiducials — rectify's upscale smooths blur, so
-    // this is the honest read of how sharp the capture actually is (spec §9.1)
-    const shot = V.assessSharpness(cv, graySrc, shotMarkers, []);
-    if (gate && shot.blurry) {
-      return post({
-        type: "analyzed", seq, rejected: "blurry", sharpness: shot,
-        soft: (shot.probes || []).filter((p) => !p.sharp).map((p) => p.name),
-      });
-    }
-
     progress("rectify");
-    // normalized long side = the page's own pixel span in the grab (upscaling
-    // past that just interpolates), clamped to [MIN, MAX]
-    const qLong = Math.max(
-      dist2(quad[0], quad[1]), dist2(quad[1], quad[2]),
-      dist2(quad[2], quad[3]), dist2(quad[3], quad[0]),
-    );
-    const targetLong = Math.round(clampN(qLong, MIN_LONG_PX, MAX_LONG_PX));
-    const { mat: normalized, width: nw, height: nh } = V.rectify(cv, src, quad, targetLong);
+    // fixed 8.5x11 @ 300 DPI canvas; rectify picks INTER_AREA / LINEAR by ratio
+    const { mat: normalized, width: nw, height: nh } =
+      V.rectify(cv, src, quad, null, LETTER_PX);
     keep(normalized);
 
     const grayN = keep(grayOf(normalized));
@@ -184,7 +185,16 @@ function onAnalyze({ seq, width, height, buffer, markers, mode, gate }) {
       pageSize = V.estimatePageSize(V.detectCornerStickers(cv, grayN, nstk));
     }
 
-    // markers re-found in normalized coords: block search + sharpness probes
+    // markers re-found in normalized coords: block search + sharpness probes.
+    // the winning frame's fiducials, in source pixels, for the report
+    const shotFiducials = (stickerMode
+      ? all.filter((m) => m.id === V.CORNER_STICKER_ID)
+      : sheet
+    ).map((m) => ({
+      id: m.id, role: m.role || null,
+      corners: m.corners.map(([x, y]) => [round3(x), round3(y)]),
+      center: (m.center || [0, 0]).map(round3),
+    }));
     const normMarkers = detector.detect(grayN);
     const markerBoxes = normMarkers.map((m) => {
       const xs = m.corners.map((p) => p[0]);
@@ -205,18 +215,10 @@ function onAnalyze({ seq, width, height, buffer, markers, mode, gate }) {
     const regMarks = block && block.registration_marks
       ? block.registration_marks.map((m) => ({ center: [m[0], m[1]], size: m[2], acutance: m[3] }))
       : [];
-    // the raw grab (pre-rectify) is the ground truth for "was this photo sharp":
-    // warpPerspective's cubic upscale always softens edges a little, so the
-    // rectified probes are reported for detail but don't drive the verdict
-    const rect = V.assessSharpness(cv, grayN, normMarkers, regMarks);
-    const sharpness = {
-      ...shot,
-      rectified_score: rect.score,
-      rectified_blurry: rect.blurry,
-      probes: (shot.probes || [])
-        .map((p) => ({ ...p, name: `shot:${p.name}` }))
-        .concat(rect.probes || []),
-    };
+    // informational only in phase A — the burst already picked the best frame;
+    // this tells the review screen how sharp that best is (SCANNER.md)
+    const sharpness = V.assessSharpness(cv, grayN, normMarkers, regMarks);
+    sharpness.focus_score = Math.round(best.score * 100) / 100;
 
     progress("segmenting text");
     const skipTop = block ? (block.bbox[1] + block.bbox[3]) / nh : 0;
@@ -226,16 +228,16 @@ function onAnalyze({ seq, width, height, buffer, markers, mode, gate }) {
     const geometry = {
       dictionary: "DICT_4X4_50",
       fiducial_mode: stickerMode ? "corner_stickers" : "printed_sheet",
-      source: { width, height },
+      source: { width: fw, height: fh },
+      burst: {
+        count: frames.length, scores, winner: best.index,
+        focus: sharpness.focus_score,
+      },
       page_frame_quad: quad.map(([x, y]) => [round3(x), round3(y)]),
       orientation: { method: stickerMode ? "geometry" : "aruco_ids", degrees: 0 },
-      normalized: { width: nw, height: nh, target_long_px: targetLong },
+      normalized: { width: nw, height: nh },
       page_size_estimate: pageSize,
-      detected_fiducials: (markers || []).map((m) => ({
-        id: m.id, role: m.role,
-        corners: m.corners.map(([x, y]) => [round3(x), round3(y)]),
-        center: m.center.map(round3),
-      })),
+      detected_fiducials: shotFiducials,
       metadata_block: block,
       literal_assets: literals,
       line_boxes: lineBoxes,

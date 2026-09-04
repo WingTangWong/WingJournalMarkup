@@ -26,10 +26,10 @@ const HOLD_MS = 450;          // all-4-inside must persist this long to fire
 const STALE_MS = 260;         // ignore marker results older than this for the trigger
 const EDGE_SLACK = 0.012;     // fraction of guide width tolerated outside the box
 const MIN_MARKER_FRAC = 0.018; // reject markers smaller than this * guide width
-const LIVE_MIN_SHARPNESS = 0.32; // auto-shutter blocked below this frame score
 const JPEG_QUALITY = 0.92;
 const HOLD_GREEN_FRAC = 0.55;    // ring fill past which the guide turns green
-const REJECT_COOLDOWN_MS = 1100; // after a blurry grab, coach for this long before re-arming
+const BURST_N = 6;              // frames grabbed on capture; worker keeps the sharpest
+const BURST_SPAN_MS = 500;      // spread the burst over this long
 
 // red → orange → yellow → green as the lock firms up
 const PHASE_COLOR = { seek: "#e5533d", frame: "#e8873a", hold: "#f2c14e", sharp: "#2ecc71" };
@@ -58,11 +58,7 @@ let lastSent = 0;
 let lockStart = 0;
 let markers = [];            // latest markers, in intrinsic (full-res) pixels
 let markersAt = 0;
-let frameSharp = null;       // {score, blurry} for the latest frame
 let fiducialMode = "sheet";  // "sheet" | "stickers"
-let cooldownUntil = 0;       // re-arm auto-capture only after this (post-reject coaching)
-let coachMsg = "";           // what the last blurry grab told the user to fix
-let softRoles = new Set();   // fiducials the last grab found soft, for the overlay
 let recognizer = null;
 let ocrBackend = "none";
 const analyzeWaiters = new Map();
@@ -113,7 +109,6 @@ function onWorkerMessage(e) {
         center: [mk.center[0] / k, mk.center[1] / k],
       }));
       markersAt = performance.now();
-      frameSharp = m.sharpness || null;
       fiducialMode = m.mode || "sheet";
       break;
     }
@@ -159,9 +154,6 @@ async function start() {
     running = true;
     lockStart = 0;
     markers = [];
-    cooldownUntil = 0;
-    coachMsg = "";
-    softRoles = new Set();
     requestAnimationFrame(loop);
   } catch (err) {
     $("btn-start").disabled = false;
@@ -251,16 +243,10 @@ function loop(ts) {
   );
   const allIn = ROLE_ORDER.every((r) => goodRoles.has(r));
   const fresh = performance.now() - markersAt < STALE_MS;
-  // live gate is lenient (raw-frame lapvar runs low); the report re-scores the
-  // rectified page against the stricter threshold
-  const blurry = !!(frameSharp && frameSharp.score < LIVE_MIN_SHARPNESS);
 
-  const cooling = performance.now() < cooldownUntil;
-  if (!cooling && coachMsg) { coachMsg = ""; softRoles = new Set(); }
-
-  // lock firms up as: corners seen (orange) → all inside & steady (yellow) →
-  // held long enough on a sharp frame (green) → grab + verify the real photo
-  const armed = allIn && fresh && !blurry && !cooling;
+  // SCANNER.md: auto-capture fires on a stable 4-anchor lock — no sharpness
+  // gate. The burst + best-of-frame selection in the worker handles focus.
+  const armed = allIn && fresh;
   if (armed && $("chk-auto").checked && !busy) {
     if (!lockStart) lockStart = ts;
   } else {
@@ -271,12 +257,12 @@ function loop(ts) {
 
   let phase;
   if (goodRoles.size < 4) phase = assessed.length ? "frame" : "seek";
-  else if (blurry || cooling || !lockStart) phase = "hold";
+  else if (!lockStart) phase = "hold";
   else phase = held >= HOLD_MS * HOLD_GREEN_FRAC ? "sharp" : "hold";
 
   updatePips(goodRoles);
   drawOverlay(assessed, guide, view, phase);
-  updateStatus(assessed, goodRoles, blurry, cooling);
+  updateStatus(assessed, goodRoles);
 
   if (lockStart && held >= HOLD_MS && !busy) capture("auto");
 }
@@ -364,8 +350,7 @@ function drawOverlay(assessed, guide, view, phase) {
     octx.beginPath();
     pts.forEach(([x, y], i) => (i ? octx.lineTo(x, y) : octx.moveTo(x, y)));
     octx.closePath();
-    const soft = a.marker.role && softRoles.has(a.marker.role);
-    const ok = a.inside && a.bigEnough && a.marker.role !== null && !soft;
+    const ok = a.inside && a.bigEnough && a.marker.role !== null;
     octx.strokeStyle = ok ? "#2ecc71" : "#e5533d";
     octx.fillStyle = ok ? "rgba(46,204,113,0.22)" : "rgba(229,83,61,0.16)";
     octx.lineWidth = 3;
@@ -376,8 +361,9 @@ function drawOverlay(assessed, guide, view, phase) {
     octx.fillStyle = "#fff";
     octx.font = "700 12px -apple-system, system-ui, sans-serif";
     octx.textAlign = "center";
-    const tag = a.marker.role ? a.marker.role.replace("_", " ") : `#${a.marker.id}`;
-    octx.fillText(soft ? `${tag} · soft` : tag, lx, ly + 4);
+    octx.fillText(
+      a.marker.role ? a.marker.role.replace("_", " ") : `#${a.marker.id}`, lx, ly + 4,
+    );
   }
 }
 
@@ -385,13 +371,9 @@ function updatePips(goodRoles) {
   for (const [role, el] of Object.entries(pips)) el.classList.toggle("on", goodRoles.has(role));
 }
 
-function updateStatus(assessed, goodRoles, blurry, cooling) {
+function updateStatus(assessed, goodRoles) {
   const n = assessed.length;
-  if (cooling && coachMsg) {
-    setStatus(coachMsg, "warn");
-  } else if (goodRoles.size === 4 && blurry) {
-    setStatus("Too blurry — hold steady", "warn");
-  } else if (goodRoles.size === 4) {
+  if (goodRoles.size === 4) {
     setStatus("Hold still…", "ok");
   } else if (n === 0) {
     setStatus("Point at a WJM sheet");
@@ -432,49 +414,39 @@ async function capture(trigger) {
   const vh = video.videoHeight;
   grabCanvas.width = vw;
   grabCanvas.height = vh;
-  const gctx = grabCanvas.getContext("2d");
-  gctx.drawImage(video, 0, 0, vw, vh);
+  const gctx = grabCanvas.getContext("2d", { willReadFrequently: true });
 
   const capturedMarkers = markers; // already intrinsic (full-res) pixels
   const stamp = new Date();
-  const gate = trigger === "auto"; // manual shutter always produces a result
 
-  setStatus(gate ? "Checking sharpness…" : "Analyzing…", "ok");
-  const full = gctx.getImageData(0, 0, vw, vh);
+  // burst: grab BURST_N frames over BURST_SPAN_MS; the worker keeps the sharpest
+  setStatus("Hold still — capturing…", "ok");
+  const frames = [];
+  for (let i = 0; i < BURST_N; i++) {
+    gctx.drawImage(video, 0, 0, vw, vh);
+    frames.push(gctx.getImageData(0, 0, vw, vh));
+    if (i < BURST_N - 1) await sleep(BURST_SPAN_MS / BURST_N);
+  }
+  // a representative raw preview (middle frame) before the buffers are transferred
+  gctx.putImageData(frames[frames.length >> 1], 0, 0);
+  const rawUrl = await canvasUrl(grabCanvas, "image/jpeg", JPEG_QUALITY);
+
+  setStatus("Analyzing…", "ok");
   const seqId = ++seq;
   const msg = await new Promise((resolve) => {
     analyzeWaiters.set(seqId, resolve);
     worker.postMessage(
-      { type: "analyze", seq: seqId, width: vw, height: vh, buffer: full.data.buffer, markers: capturedMarkers, mode: fiducialMode, gate },
-      [full.data.buffer],
+      {
+        type: "analyze", seq: seqId, mode: fiducialMode, markers: capturedMarkers,
+        frames: frames.map((f) => ({ buffer: f.data.buffer, width: f.width, height: f.height })),
+      },
+      frames.map((f) => f.data.buffer),
     );
     setTimeout(() => {
       if (analyzeWaiters.has(seqId)) { analyzeWaiters.delete(seqId); resolve({ error: "analysis timed out" }); }
-    }, 20000);
+    }, 25000);
   });
 
-  // the real photo came back soft — coach and drop straight back to the live
-  // feed to re-focus and re-lock (spec §9.1)
-  if (msg && msg.rejected) {
-    const roles = (msg.soft || [])
-      .map((n) => { const m = /(\d+)$/.exec(n); return m ? ROLE_ORDER[+m[1]] : null; })
-      .filter(Boolean);
-    softRoles = new Set(roles);
-    coachMsg = roles.length
-      ? `Soft at ${roles.map((r) => r.replace("_", " ").toLowerCase()).join(", ")} — move closer & hold steady`
-      : "Too blurry — move closer, steady the phone, let it focus";
-    cooldownUntil = performance.now() + REJECT_COOLDOWN_MS;
-    navigator.vibrate?.(120);
-    setStatus(coachMsg, "warn");
-    lockStart = 0;
-    setLockRing(0);
-    busy = false;
-    running = true;
-    requestAnimationFrame(loop);
-    return;
-  }
-
-  const rawUrl = await canvasUrl(grabCanvas, "image/jpeg", JPEG_QUALITY);
   let capture;
   let rectUrl = null;
 
@@ -485,9 +457,8 @@ async function capture(trigger) {
     rectCanvas.getContext("2d").putImageData(
       new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0,
     );
-    // JPEG: the rectified page can now be ~2800 px on the long side and a PNG
-    // encode of that stalls the main thread; OCR crops come off rectCanvas
-    // (the raw pixels), not this URL, so quality there is unaffected
+    // JPEG: the rectified page is 2550x3300 and a PNG encode of that stalls the
+    // main thread; OCR crops come off rectCanvas (the raw pixels), not this URL
     rectUrl = await canvasUrl(rectCanvas, "image/jpeg", JPEG_QUALITY);
     capture = await runExtraction(msg.geometry, rectCanvas);
   } else {
@@ -541,6 +512,7 @@ async function runExtraction(geometry, rect) {
     normalized: g.normalized,
     page_size_estimate: g.page_size_estimate || null,
     detected_fiducials: g.detected_fiducials,
+    burst: g.burst || null,
     metadata_block: g.metadata_block,
     sharpness: g.sharpness || null,
     page_metadata: null,
@@ -657,12 +629,14 @@ function buildNotes(c) {
     notes.push(`page ~${Math.round(p.width_mm)}x${Math.round(p.height_mm)} mm`
       + (p.best_match ? ` (${p.best_match})` : " (no standard match)"));
   }
+  if (c.burst) {
+    notes.push(`burst of ${c.burst.count}, kept frame ${c.burst.winner} (focus ${c.burst.focus})`);
+  }
   if (c.sharpness) {
     const soft = (c.sharpness.probes || []).filter((p) => !p.sharp).map((p) => p.name);
     notes.push(
       `sharpness ${c.sharpness.score} (lapvar ${c.sharpness.laplacian_variance})`
-      + (soft.length ? `; soft at ${soft.join(", ")}` : "")
-      + (c.sharpness.blurry ? " - BLURRY, retake" : ""),
+      + (soft.length ? `; soft at ${soft.join(", ")}` : ""),
     );
   }
   if (c.metadata_block) {
@@ -751,7 +725,11 @@ function sectionExtraction(c, error) {
   out.push(srow("markers", `${(c.detected_fiducials || []).map((f) => f.id).join(", ") || "—"}  (${esc(c.dictionary || "DICT_4X4_50")})`));
   if (c.fiducial_mode === "corner_stickers") out.push(srow("fiducials", "adhesive corner stickers"));
   if (c.source) out.push(srow("photo", `${c.source.width}×${c.source.height}`));
-  if (c.normalized) out.push(srow("rectified", `${c.normalized.width}×${c.normalized.height}`));
+  if (c.burst) {
+    out.push(srow("burst", `best of ${c.burst.count} — focus ${c.burst.focus}`
+      + `  (frames ${c.burst.scores.join(", ")})`));
+  }
+  if (c.normalized) out.push(srow("rectified", `${c.normalized.width}×${c.normalized.height}  (300 DPI)`));
   const ps = c.page_size_estimate;
   if (ps) {
     out.push(srow(
@@ -766,14 +744,15 @@ function sectionExtraction(c, error) {
 
   const s = c.sharpness;
   if (s) {
+    // informational in phase A — nothing is rejected on this; it just tells you
+    // how the best-of-burst frame came out
     out.push(srow(
-      "sharpness",
-      `${s.score}  (lapvar ${s.laplacian_variance})` + (s.blurry ? "  ⚠ blurry" : ""),
-      s.blurry ? "err" : "",
+      "sharpness (fyi)",
+      `${s.score}  (lapvar ${s.laplacian_variance})` + (s.blurry ? "  — soft" : ""),
+      "muted",
     ));
-    if (s.rectified_score != null) out.push(srow("  rectified score", `${s.rectified_score}`, "muted"));
     for (const p of s.probes || []) {
-      out.push(srow("  " + p.name, `${p.acutance}  ${p.sharp ? "sharp" : "blurry"}`, p.sharp ? "muted" : "err"));
+      out.push(srow("  " + p.name, `${p.acutance}  ${p.sharp ? "sharp" : "soft"}`, "muted"));
     }
   }
 
@@ -872,9 +851,6 @@ $("btn-retake").addEventListener("click", () => {
   running = true;
   lockStart = 0;
   markers = [];
-  cooldownUntil = 0;
-  coachMsg = "";
-  softRoles = new Set();
   setStatus("Point at a WJM sheet");
   requestAnimationFrame(loop);
 });
@@ -896,6 +872,7 @@ function canvasUrl(canvas, type, quality) {
 }
 const round1 = (v) => Math.round(v * 10) / 10;
 const once = (el, ev) => new Promise((res) => el.addEventListener(ev, res, { once: true }));
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 function fatal(msg) {
   running = false;
