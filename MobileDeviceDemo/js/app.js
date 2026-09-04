@@ -7,6 +7,7 @@
 // classic script) turns recognized text into typed elements.
 
 import { getRecognizer } from "./ocr.js";
+import { getHTR } from "./htr.js";
 
 const OPENCV_URLS = (window.OPENCV_URLS || ["vendor/opencv.js"]).map(
   (u) => new URL(u, location.href).href,
@@ -16,6 +17,14 @@ const TESSERACT_PATHS = {
   workerPath: new URL("vendor/tesseract/worker.min.js", location.href).href,
   corePath: new URL("vendor/tesseract/tesseract-core-simd-lstm.wasm.js", location.href).href,
   langPath: new URL("vendor/tesseract/", location.href).href,
+};
+// CRNN+CTC handwriting model (js/htr.js) — see that file's header for
+// provenance/license. Metadata-field-only, run alongside Tesseract for
+// comparison; see runExtraction.
+const HTR_PATHS = {
+  ortJs: new URL("vendor/htr/ort.min.js", location.href).href,
+  wasm: new URL("vendor/htr/ort-wasm-simd.wasm", location.href).href,
+  model: new URL("vendor/htr/model_int8.onnx", location.href).href,
 };
 const ROLE_ORDER = ["TOP_LEFT", "TOP_RIGHT", "BOTTOM_RIGHT", "BOTTOM_LEFT"];
 
@@ -61,6 +70,8 @@ let markersAt = 0;
 let fiducialMode = "sheet";  // "sheet" | "stickers"
 let recognizer = null;
 let ocrBackend = "none";
+let htr = null;              // HTRRecognizer, once loaded — metadata fields only
+let htrBackend = "none";
 const waiters = new Map();   // seq -> resolve, for analyze/composite/finish replies
 
 // ---- close-up pass state (SCANNER.md phase B) -----------------------
@@ -96,6 +107,13 @@ const objectUrls = [];
     recognizer = rec;
     ocrBackend = rec.name;
   }).catch(() => { ocrBackend = "none"; });
+
+  // handwriting model (metadata fields only — see js/htr.js); optional, never
+  // blocks capture if the ~12 MB of WASM+model fails to load or is slow
+  getHTR(HTR_PATHS).then((rec) => {
+    htr = rec;
+    htrBackend = rec ? rec.name : "none";
+  });
 })();
 
 function onWorkerMessage(e) {
@@ -932,9 +950,21 @@ async function runExtraction(geometry, rect) {
       text = r.text;
     }
     rowText.push(text);
+    // handwriting model, for comparison only (spec: metadata fields are the
+    // fit — short, conventionally all-caps; see js/htr.js's header). `work`
+    // still holds this field's padded crop right after region() above.
+    let htrResult = null;
+    if (htr && cells[i]) {
+      try {
+        const hr = await htr.recognize(work);
+        if (hr.recognized) {
+          htrResult = { text: hr.text, confidence: hr.words[0] ? hr.words[0].confidence : null };
+        }
+      } catch (e) { /* HTR is best-effort */ }
+    }
     capture._debug.metadata_cells.push({
       field: METADATA_FIELDS[i], bbox: cells[i], text, confidence,
-      recognized: !!r.recognized, cropUrl: r.cropUrl,
+      recognized: !!r.recognized, cropUrl: r.cropUrl, htr: htrResult,
     });
   }
   capture.page_metadata = Object.assign(
@@ -1120,6 +1150,9 @@ function sectionExtraction(c, error) {
   }
   if (c.metadata_block) out.push(srow("block found via", esc(c.metadata_block.detection)));
   out.push(srow("OCR engine", esc(c.text_backend || ocrBackend)));
+  if (htrBackend === "htr") {
+    out.push(srow("+ handwriting model", "CRNN+CTC (metadata fields, caps-only) — see crops below", "muted"));
+  }
 
   const s = c.sharpness;
   if (s) {
@@ -1170,6 +1203,9 @@ function sectionMetadataCrops(c) {
     cropUrl: cell.cropUrl,
     read: cell.bbox ? (cell.recognized ? cell.text : "(nothing read)") : "(cell not found)",
     readEmpty: !cell.recognized,
+    extra: cell.htr
+      ? `HTR: "${cell.htr.text}"  (${Math.round((cell.htr.confidence || 0) * 100)}%, caps-only model)`
+      : (htrBackend === "htr" && cell.bbox ? "HTR: (nothing read)" : null),
   }));
   return out;
 }
@@ -1201,7 +1237,7 @@ function sectionBody(c) {
   return out;
 }
 
-function cropCard({ label, badge, badgeCls, cropUrl, read, readEmpty }) {
+function cropCard({ label, badge, badgeCls, cropUrl, read, readEmpty, extra }) {
   const card = el("div", "crop");
   card.appendChild(el("header", null,
     `<span>${esc(label)}</span><span class="badge ${badgeCls || ""}">${esc(badge)}</span>`));
@@ -1212,6 +1248,7 @@ function cropCard({ label, badge, badgeCls, cropUrl, read, readEmpty }) {
     card.appendChild(img);
   }
   card.appendChild(el("div", "read" + (readEmpty ? " empty" : ""), esc(read)));
+  if (extra) card.appendChild(el("div", "read muted", esc(extra)));
   return card;
 }
 

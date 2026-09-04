@@ -17,9 +17,9 @@ so a capture here matches `wingjournal ingest --parse-body`.
 **<https://wingtangwong.github.io/WingJournalMarkup/MobileDeviceDemo/>** — open
 it on a phone, tap **Start camera**, hold a printed WJM sheet in the frame.
 
-`vendor/opencv.js` and `vendor/tesseract/` (the WASM engines, ~17 MB) are
-committed, so the whole demo serves from the repo / GitHub Pages with no
-external calls.
+`vendor/opencv.js`, `vendor/tesseract/`, and `vendor/htr/` (the WASM engines,
+~30 MB total) are committed, so the whole demo serves from the repo / GitHub
+Pages with no external calls.
 
 ## Run locally
 
@@ -30,7 +30,8 @@ python3 serve.py           # http://localhost:8000
 
 Open it in a desktop browser and hold a printed WJM sheet (or
 `samples/wjm-writing-sheet-letter.png` on another screen) up to the webcam.
-`./fetch-opencv.sh [version]` refreshes the vendored OpenCV.js.
+`./fetch-opencv.sh [version]` refreshes the vendored OpenCV.js;
+`./fetch-htr.sh` refreshes the handwriting-model assets.
 
 ### Serving it yourself over the LAN
 
@@ -56,7 +57,8 @@ also gives you HTTPS without certs.
 |---|---|
 | **`js/worker.js`** (Web Worker) | OpenCV.js (WASM). Per-frame ArUco detection; `analyze` picks the sharpest burst frame (Tenengrad), rectifies to a fixed 2550×3300 canvas, runs the recognition geometry, plans close-up targets, and keeps the canvas in a session; `composite` registers + feather-pastes each close-up (ArUco anchor homography, then AKAZE/ORB restricted to text landmarks — all rotation-tolerant, so the phone can be turned any way); `finish` re-recognises the composite. Keeps the 11 MB compile and all pixel work off the UI thread. |
 | **Tesseract.js** (its own worker, spawned from the main thread) | OCR of the metadata cells and each body line off the rectified page. |
-| **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR → parse. |
+| **`js/htr.js`** (main thread, `onnxruntime-web` WASM) | A small CRNN+CTC handwriting model, run alongside Tesseract on metadata cells only — see [Handwriting recognition](#handwriting-recognition-experimental). |
+| **`js/app.js`** (main thread) | Camera, guide overlay, auto-capture trigger, and the recognition tail: crop each region → OCR (+ HTR on metadata) → parse. |
 | **`js/wjm-parse.js`** | The WJM grammar + element parser (bullets, tags, temporal, references, contacts). Pure text, no dependencies. |
 
 ### The capture flow
@@ -107,7 +109,9 @@ back:
   acutance table** (soft probes flagged red), and all seven metadata fields;
 - **Metadata cells — crops fed to OCR**: for each of `document_id`, `page_id`,
   `topic_tags`, `left`, `above`, `below`, `right`, the exact padded crop handed
-  to Tesseract and what it read (or *nothing read*, in red);
+  to Tesseract and what it read (or *nothing read*, in red) — plus, if the
+  handwriting model loaded, a second **HTR:** line with its own reading, for
+  direct comparison (see [Handwriting recognition](#handwriting-recognition-experimental) below);
 - **Page body**: each segmented text line as its crop + OCR text + the element
   it parsed to; literal regions shown as *as-is image*.
 
@@ -138,6 +142,35 @@ and the **capture data** (JSON — crops omitted to keep it small):
 
 Every element carries a `bbox` in normalized-page coordinates, so a PDF/SVG can
 be rebuilt from it (planned).
+
+### Handwriting recognition (experimental)
+
+Tesseract.js is an LSTM trained mostly on printed fonts — weak on cursive by
+its own project description. `js/htr.js` adds a small **CRNN+CTC** model
+trained on real handwriting (the IAM database) as a second opinion, run
+through `onnxruntime-web` (WASM):
+
+- ~1 MB, int8-quantized, ~50ms/field on CPU after a one-time ~200ms model load;
+- fixed 256×48 input, **one word or short phrase per call** — a good match for
+  this project's metadata fields, not for full body sentences;
+- **42-symbol charset: digits, `A–Z`, `Ä Ö Ü`, `'`/`-` — uppercase only**, no
+  lowercase or other punctuation. That's the model, not a bug.
+
+It runs automatically alongside Tesseract on the seven metadata cells only
+(never on body lines) and shows up as a second **HTR:** line under each crop
+in the report — nothing is auto-selected between the two; you read both and
+judge. If the ~12 MB of model+runtime fails to load or is slow, the rest of
+the demo is unaffected — Tesseract's reading is always still there.
+
+**Provenance / license — read before reusing this outside a hobby project.**
+The model is Harald Scheidl's browser HTR demo
+([writeup](https://githubharald.github.io/text_reader.html),
+[HTRPipeline](https://github.com/githubharald/HTRPipeline)), trained on the
+**IAM Handwriting Database (CC BY-NC-SA 4.0 — non-commercial)**. No explicit
+redistribution license is stated by the author beyond the public demo itself.
+It's vendored here with attribution, on the understanding that this stays a
+non-commercial research/hobby inclusion — see the header of `js/htr.js` before
+changing or re-vendoring it.
 
 ## Development workflow
 
@@ -175,9 +208,11 @@ js/worker.js           OpenCV.js (WASM); ArUco + geometric extraction (Web Worke
 js/vision-core.js      MarkerDetector, page quad, rectify, metadata block, segment, literals
 js/wjm-parse.js        WJM grammar + element parser (pure text)
 js/ocr.js              Tesseract.js wrapper + null fallback
+js/htr.js              CRNN+CTC handwriting model wrapper (onnxruntime-web)
 serve.py               stdlib static server (HTTP, or HTTPS with --cert/--key)
 fetch-opencv.sh        refresh vendor/opencv.js
-vendor/                opencv.js + tesseract/ (committed WASM engines)
+fetch-htr.sh           refresh vendor/htr/ (onnxruntime-web + the model)
+vendor/                opencv.js + tesseract/ + htr/ (committed WASM engines)
 tests/                 parse.test.mjs, vision.test.mjs  (node)
 ```
 
@@ -185,5 +220,9 @@ tests/                 parse.test.mjs, vision.test.mjs  (node)
 
 Local demo — no batching, persistence, or upload; the JSON is yours to feed into
 the CLI / store. Handwriting OCR is weak (Tesseract, same as the CLI's first
-pass); machine-printed text reads well. Extraction quality tracks lighting and
-how flat the page is held.
+pass); machine-printed text reads well. The CRNN+CTC model
+([above](#handwriting-recognition-experimental)) does better on genuine
+cursive/print handwriting but only reads short, uppercase text, only on
+metadata fields, and carries a non-commercial-leaning license — read its
+section before relying on it for anything beyond this demo. Extraction quality
+tracks lighting and how flat the page is held.
