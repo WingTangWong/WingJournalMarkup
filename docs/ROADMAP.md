@@ -114,21 +114,29 @@ visually unambiguous against the 3 code-bit squares).
 - ✅ `WebDemoMarkers/` — stand-alone static demo (sibling to
       `MobileDeviceDemo/`, own `vendor/opencv.js`), live camera preview,
       OpenCV.js in a Web Worker
-- ✅ `js/glyph-detect.js`: nested-contour circularity detection for the
-      bullseye (ring → hole → center dot, the same technique
-      `vision/registration.py` / `vision-core.js` use for the concentric-
-      square registration marks, circular instead of square), `approxPolyDP`
-      for the box quad, ink-density probes at the 3 non-anchor corners.
-      Corners are read clockwise starting from whichever one sits nearest
-      the bullseye, so the UR/LR/LL reading is rotation-tolerant by
-      construction — verified in `tests/glyph-detect.test.mjs` (all 8
-      values, a 25° rotation, two glyphs in one frame)
+- ✅ `js/glyph-detect.js` (v3): `cv.HoughCircles` + concentric ink-density
+      confirmation for the bullseye (gradient voting survives ring gaps and
+      uneven strokes; contour-nesting did not), then a box fit that never
+      requires the box to be one connected shape — ink is grouped into
+      components, filtered to those long enough to be a box edge (this, not
+      distance, is what excludes nearby writing), seeded from the component
+      nearest the bullseye, and grown by iterative `minAreaRect` refits.
+      Corners are read clockwise from whichever sits nearest the bullseye,
+      so the UR/LR/LL reading is rotation-tolerant by construction
 - ✅ Live overlay: green quad + bullseye ring, filled/hollow dots at the 3
       code corners, decoded value (0–7) rendered on the box
-- ⬜ Validated only against synthetic (drawn-with-OpenCV) glyphs so far —
-      real hand-drawn ink (marker wobble, uneven stroke width, paper/lighting
-      noise) will need the same tolerance-tuning pass the HTR backends did;
-      no REALWORLD-SAMPLES coverage yet
+- ✅ Tolerance pass driven by a real photo, not guesswork. Two findings
+      broke the original design outright: the boxes are drawn as **open
+      3-sided brackets** (the side facing the bullseye is left undrawn), and
+      hand-drawn rings are often far from circular by `4π·area/perimeter²`
+      and can have a stroke gap that breaks contour nesting. Now covered by
+      14 passing tests including mid-line gaps, wobbly/non-parallel edges,
+      hatched (non-solid) corner marks, stray writing beside the glyph, and
+      two glyphs at real packing density
+- 🚧 Real photo (hand-drawn 4x4 reference sheet, 16 glyphs, tightly packed):
+      **9 of 16 decoded, ~600ms** — v1/v2 found none at all on it, but this
+      is not full coverage and the remaining ~7 are open. Not yet wired into
+      REALWORLD-SAMPLES as a standing fixture
 - ⬜ Mapping the decoded value back to WJM's semantic fields
       (document_id/page_id/left/above/below/right, echoing §11.4's table) —
       out of scope for this pass, which stops at detect + decode + visualize

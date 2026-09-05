@@ -50,39 +50,57 @@ Pure classical CV, no ArUco, no ML:
 
 1. **Binarize**: `GaussianBlur` + Otsu threshold (ink = 255), same as
    `vision/registration.py`'s registration-mark detector.
-2. **Find bullseyes**: `findContours(RETR_TREE)`, then for each top-level
-   contour, check it's roughly circular (`4π·area/perimeter²`, tolerant of
-   hand-drawn wobble), that it has a hole (the ring's white interior), and
-   that the hole in turn has a child contour (the center dot) of plausible
-   size, centered near the ring's center. This is the exact nested-contour
-   technique the concentric-square registration marks use — circular
-   instead of square.
-3. **Find box quads**: `approxPolyDP` on the other top-level contours,
-   keeping 4-point convex results with a filled-enough bounding box.
-4. **Pair** each bullseye with its nearest plausibly-sized quad (nearest
-   distance wins first, so two glyphs near each other don't steal one
-   another's box).
-5. **Orient**: sort the quad's corners clockwise on screen, find the one
-   nearest the bullseye (the anchor), and read the next three clockwise as
-   upper-right / lower-right / lower-left.
-6. **Decode**: probe a small square just inside each of those 3 corners
-   (inset toward the box's center) for ink density; > ~38% dark → bit = 1.
+2. **Find bullseyes**: `cv.HoughCircles` on a median-blurred grayscale.
+   Gradient voting finds a circle even when the ring has a gap or an uneven,
+   retraced stroke — a contour-topology test can't. Each candidate is then
+   confirmed against the ink mask by sampling three concentric bands: a dark
+   center (the dot), a light middle, a dark outer ring.
+3. **Group ink into components** once per frame, keeping only those long
+   enough to plausibly be a box edge (a real edge runs a couple of bullseye
+   diameters; an individual handwritten letter stroke does not). This — not
+   distance — is what keeps nearby writing out of the fit.
+4. **Fit the box**, seeded from the single qualifying component *nearest the
+   bullseye* (by design the intended box sits right beside it, far closer
+   than any neighbouring glyph's box), then grown: each round, `minAreaRect`
+   refits over whatever qualifying ink landed near the current fit's
+   boundary. A gappy box's other sides join as the fit reaches them; a
+   neighbouring glyph's box never does.
+5. **Orient**: sort the fitted rectangle's corners clockwise on screen, find
+   the one nearest the bullseye (the anchor), and read the next three
+   clockwise as upper-right / lower-right / lower-left.
+6. **Decode**: probe just inside each of those 3 corners for ink density —
+   a low bar, so a hatched or scribbled mark counts, not only a solid fill.
 
-Runs per-frame in `js/worker.js` (a Web Worker, so the camera preview never
-stutters) at a downscaled processing width (`PROC_W` in `js/app.js`), same
-pattern as `MobileDeviceDemo`.
+Nothing here requires the box to be one connected shape, a closed loop, or
+made of straight lines, which is what makes it tolerant of real hand-drawn
+error. Runs per-frame in `js/worker.js` (a Web Worker, so the camera preview
+never stutters) at a downscaled processing width (`PROC_W` in `js/app.js`),
+same pattern as `MobileDeviceDemo`.
 
 ## Status
 
-First pass, verified only against **synthetic** glyphs (drawn with OpenCV's
-own primitives — see `tests/glyph-detect.test.mjs`): all 8 values decode
-correctly, a 25°-rotated glyph still decodes correctly, and two glyphs in
-one frame both decode without cross-pairing. **Not yet run against real
-hand-drawn ink** — marker-pen wobble, uneven stroke width, and real
-paper/lighting noise will likely need the same tolerance-tuning pass the
-project's OCR/HTR work went through (the circularity/size/ink-density
-thresholds in `js/glyph-detect.js` are commented as tuning knobs for
-exactly that reason).
+**Synthetic** (`tests/glyph-detect.test.mjs`, all 14 passing): every 3-bit
+value, open-bracket and closed boxes, 25° rotation, mid-line gaps, wobbly
+non-parallel edges, a hatched rather than solid corner mark, stray
+handwriting-like ink beside the glyph, two glyphs at real-sheet packing
+density, plus negative cases (blank page; a plain rectangle with no
+bullseye).
+
+**Real photo** — a hand-drawn 4x4 reference sheet (16 glyphs, packed tightly,
+with label text close enough above the first glyph to have wrecked an earlier
+version's fit): **9 of 16 decoded, ~600ms** at 1320px wide. The two earlier
+versions of this detector found *nothing* on that sheet, so this is a large
+step, but it is **not** full coverage — the remaining ~7 are an open item.
+That sheet is also a deliberately hard case: 16 glyphs at a density a real
+page would rarely have.
+
+Diagnosing against that real photo is what drove the design. Two findings
+were worth more than any amount of threshold tuning: the boxes are drawn as
+**open 3-sided brackets** (the side facing the bullseye is simply not drawn),
+and a hand-drawn ring's traced contour is often nowhere near circular in the
+strict `4π·area/perimeter²` sense and can have a gap that breaks contour
+nesting outright. Both broke the original approach at a level no parameter
+could fix.
 
 Out of scope for this pass: mapping the decoded 0–7 value back to WJM's
 semantic metadata fields (document_id/page_id/left/above/below/right) —

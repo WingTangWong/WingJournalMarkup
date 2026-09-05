@@ -13,23 +13,57 @@
  *     square patch just inside that corner, or be left plain.
  *
  * Those three corners are a 3-bit code: bit2=upper-right, bit1=lower-right,
- * bit0=lower-left ("None" filled = 0, all three filled = 7). Detection is
- * pure classical CV — nested-contour shape analysis for the bullseye (the
- * same technique src/wingjournal/vision/registration.py and this demo's
- * sibling MobileDeviceDemo/js/vision-core.js use for the concentric-square
- * registration marks, just circular instead of square), approxPolyDP for
- * the box outline, and a small ink-density probe at each candidate corner.
- * No ArUco dictionary, no ML model.
+ * bit0=lower-left ("None" filled = 0, all three filled = 7). Pure classical
+ * CV, no dictionary, no ML model.
  *
  * Rotation/tilt tolerance: corners are read off in clockwise order starting
  * from whichever corner sits nearest the bullseye, so the UR/LR/LL labels
  * stay correct no matter how the glyph is rotated in frame — the bullseye
  * (found first, independent of the box's orientation) anchors the reading.
  *
- * Tuning knobs below (circularity/size/density thresholds) are first-pass
- * numbers, not calibrated against real hand-drawn samples yet — expect to
- * revisit them once this runs against real photos, the same way the
- * project's OCR/HTR tuning has gone.
+ * v3 — built for a *high* degree of tolerance to real hand-drawn error, not
+ * just the specific failure found in v1/v2. The design principle changed:
+ * v1/v2 both tried to find ONE clean connected ink shape and measure it
+ * precisely (a closed contour, then an open-but-still-one-blob contour).
+ * That breaks the moment the ink itself is broken — a dashed/gappy line, a
+ * corner that doesn't quite meet, a stroke that touches nearby handwriting
+ * and gets fused into one big contour with it. v3 never depends on the box
+ * being one connected shape at all:
+ *
+ *   - bullseye: unchanged from v2 — cv.HoughCircles (gradient voting
+ *     tolerates ring gaps and stroke irregularity) confirmed by ink density
+ *     in three concentric bands (dark center dot, light middle, dark ring).
+ *   - box: anchored on a confirmed bullseye. Every ink pixel is grouped into
+ *     its connected component once per frame (findInkComponents); a
+ *     component only counts as possible box material if it's LONG relative
+ *     to the bullseye (a real box edge is a couple of bullseye-diameters
+ *     long; an individual handwritten letter stroke is not — this is what
+ *     actually rejects nearby writing, not distance alone, since real
+ *     writing is often well within any search radius generous enough to
+ *     tolerate a gappy box). The fit is then SEEDED from the single
+ *     qualifying component nearest the bullseye — by design the intended
+ *     box sits right next to it, much closer than any neighboring glyph's
+ *     box in a densely packed sheet — and grown: each round, cv.minAreaRect
+ *     refits over whatever qualifying ink (from any component in range)
+ *     ended up near the current fit's boundary. A gappy box's other sides
+ *     (separate components) join in once the fit reaches them; a distant
+ *     neighboring glyph's box never does, because seeding from "nearest
+ *     first" means it's never in the running to begin with.
+ *
+ * Verified two ways. Synthetic (tests/glyph-detect.test.mjs, all passing):
+ * every 3-bit value, an open-bracket box and a closed one, 25-degree
+ * rotation, mid-line gaps, wobbly/non-parallel edges, a hatched rather than
+ * solid corner mark, stray handwriting-like ink beside the glyph, two
+ * glyphs at real-sheet packing density, and negative cases (blank page, a
+ * plain rectangle with no bullseye).
+ *
+ * Real photo (a hand-drawn 4x4 reference sheet, 16 glyphs, packed tightly
+ * and with label text close enough above the first glyph to have wrecked an
+ * earlier version's fit): 9 of 16 decoded, ~600ms at 1320px wide. That is a
+ * large improvement on the versions before it (v1/v2 found none at all on
+ * this sheet) but it is NOT full coverage — the remaining ~7 are an open
+ * item, not a solved problem, and this sheet is a deliberately hard case
+ * (16 glyphs at a packing density a real page would rarely have).
  *
  * detectGlyphs(cv, gray) -> [{
  *   quad: [[x,y]x4]  clockwise, quad[anchorIndex] is the corner nearest the bullseye
@@ -41,8 +75,6 @@
  */
 (function (root) {
   "use strict";
-
-  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
   function centroid(pts) {
     let x = 0;
@@ -60,85 +92,325 @@
     );
   }
 
-  // roughly-circular blob test — tolerant of hand-drawn wobble on purpose.
-  // Works the same whether the contour is a filled dot or a ring's outer
-  // boundary (contourArea/arcLength only see the outer edge either way).
-  function circleish(C, cnt) {
-    const area = C.contourArea(cnt);
-    if (area < 8) return null;
-    const r = C.boundingRect(cnt);
-    if (Math.min(r.width, r.height) === 0) return null;
-    if (Math.abs(r.width - r.height) > 0.45 * Math.max(r.width, r.height)) return null;
-    const peri = C.arcLength(cnt, true);
-    if (peri <= 0) return null;
-    const circularity = (4 * Math.PI * area) / (peri * peri); // 1.0 = perfect circle
-    if (circularity < 0.5) return null;
-    return { cx: r.x + r.width / 2, cy: r.y + r.height / 2, diameter: Math.max(r.width, r.height) };
-  }
-
-  function quadFromContour(C, cnt) {
-    const area = C.contourArea(cnt);
-    if (area < 60) return null;
-    const peri = C.arcLength(cnt, true);
-    const approx = new C.Mat();
-    C.approxPolyDP(cnt, approx, 0.02 * peri, true);
-    let corners = null;
-    if (approx.rows === 4 && C.isContourConvex(approx)) {
-      corners = [];
-      for (let i = 0; i < 4; i++) {
-        corners.push({ x: approx.data32S[i * 2], y: approx.data32S[i * 2 + 1] });
+  // fraction of "ink" (binary mask > 0) pixels within an annulus
+  // [r0, r1] around (cx, cy) — r0 = 0 samples a solid disk. Used both to
+  // confirm a Hough circle is a real bullseye (dark center / light middle /
+  // dark outer ring) and, with a tiny disk, as a single-point ink probe.
+  function annulusInkFrac(binary, cx, cy, r0, r1) {
+    const W = binary.cols;
+    const H = binary.rows;
+    const data = binary.data;
+    const x0 = Math.max(0, Math.floor(cx - r1));
+    const x1 = Math.min(W - 1, Math.ceil(cx + r1));
+    const y0 = Math.max(0, Math.floor(cy - r1));
+    const y1 = Math.min(H - 1, Math.ceil(cy + r1));
+    const r0sq = r0 * r0;
+    const r1sq = r1 * r1;
+    let hit = 0;
+    let total = 0;
+    for (let y = y0; y <= y1; y++) {
+      const rowOff = y * W;
+      const dy = y - cy;
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < r0sq || d2 > r1sq) continue;
+        total++;
+        if (data[rowOff + x] > 0) hit++;
       }
     }
-    approx.delete();
-    if (!corners) return null;
-    const r = C.boundingRect(cnt);
-    if (area / (r.width * r.height) < 0.55) return null; // reject very non-rectangular quads
-    return corners;
+    return total ? hit / total : 0;
   }
 
-  // hierarchy[i*4 + {0:next,1:prev,2:child,3:parent}] — RETR_TREE layout
-  function findBullseyes(C, contours, hd, lo, hi) {
+  // cv.HoughCircles finds circular edge structure directly from gradients —
+  // tolerant of a gap in the ring or an uneven/retraced stroke, unlike
+  // requiring a topologically closed contour. Confirmed against the ink mask:
+  // dark center (the dot), light middle band, dark outer ring.
+  function findBullseyes(C, gray, binary, lo, hi) {
+    const minR = Math.max(4, lo / 2);
+    const maxR = Math.max(minR + 1, hi / 2);
+    const minDist = Math.max(20, lo);
+
+    const med = new C.Mat();
+    C.medianBlur(gray, med, 5);
+    const circles = new C.Mat();
+    C.HoughCircles(med, circles, C.HOUGH_GRADIENT, 1.2, minDist, 80, 28, minR, maxR);
+    med.delete();
+
     const found = [];
-    for (let i = 0; i < contours.size(); i++) {
-      if (hd[i * 4 + 3] !== -1) continue; // top-level only: the ring's outer edge
-      const cnt = contours.get(i);
-      const outer = circleish(C, cnt);
-      cnt.delete();
-      if (!outer || outer.diameter < lo || outer.diameter > hi) continue;
-
-      const holeIdx = hd[i * 4 + 2];
-      if (holeIdx === -1) continue; // no hole -> not a ring, just a filled blob
-      const holeCnt = contours.get(holeIdx);
-      const hole = circleish(C, holeCnt);
-      holeCnt.delete();
-      if (!hole || hole.diameter < 0.3 * outer.diameter || hole.diameter > 0.92 * outer.diameter) continue;
-
-      // the center dot sits as a child of the hole (a foreground blob inside
-      // the ring's background-colored interior) — walk the hole's children
-      let dot = null;
-      let d = hd[holeIdx * 4 + 2];
-      while (d !== -1) {
-        const dotCnt = contours.get(d);
-        const cand = circleish(C, dotCnt);
-        dotCnt.delete();
-        if (cand && cand.diameter >= 0.06 * outer.diameter && cand.diameter <= 0.65 * outer.diameter
-          && Math.hypot(cand.cx - outer.cx, cand.cy - outer.cy) < 0.4 * outer.diameter) {
-          dot = cand;
-          break;
-        }
-        d = hd[d * 4]; // next sibling
+    const n = circles.data32F.length / 3;
+    for (let i = 0; i < n; i++) {
+      const cx = circles.data32F[i * 3];
+      const cy = circles.data32F[i * 3 + 1];
+      const r = circles.data32F[i * 3 + 2];
+      const centerInk = annulusInkFrac(binary, cx, cy, 0, r * 0.25);
+      const midInk = annulusInkFrac(binary, cx, cy, r * 0.35, r * 0.68);
+      // wider than the ring's nominal footprint on purpose: Hough's own
+      // radius estimate can be off by a fair bit under rotation/interpolation
+      // or a wobbly hand-drawn ring, so a tight band can miss ink that's
+      // really there
+      const ringInk = annulusInkFrac(binary, cx, cy, r * 0.7, r * 1.2);
+      if (centerInk > 0.4 && midInk < 0.42 && ringInk > 0.28) {
+        found.push({ cx, cy, diameter: r * 2 });
       }
-      if (!dot) continue;
-
-      found.push({ cx: outer.cx, cy: outer.cy, diameter: outer.diameter });
     }
+    circles.delete();
     return found;
   }
 
-  function longSide(q) {
-    const xs = q.map((p) => p.x);
-    const ys = q.map((p) => p.y);
-    return Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+  function rotatedRectCorners(rect) {
+    const { center, size, angle } = rect;
+    const a = (angle * Math.PI) / 180;
+    const cos = Math.cos(a);
+    const sin = Math.sin(a);
+    const hw = size.width / 2;
+    const hh = size.height / 2;
+    return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([lx, ly]) => ({
+      x: center.x + lx * cos - ly * sin,
+      y: center.y + lx * sin + ly * cos,
+    }));
+  }
+
+  function hasInkNear(binary, x, y, half) {
+    const W = binary.cols;
+    const H = binary.rows;
+    const data = binary.data;
+    const xi = Math.round(x);
+    const yi = Math.round(y);
+    half = Math.max(1, Math.round(half)); // must be integer: used as a raw pixel-index offset below
+    for (let dy = -half; dy <= half; dy++) {
+      const yy = yi + dy;
+      if (yy < 0 || yy >= H) continue;
+      const rowOff = yy * W;
+      for (let dx = -half; dx <= half; dx++) {
+        const xx = xi + dx;
+        if (xx < 0 || xx >= W) continue;
+        if (data[rowOff + xx] > 0) return true;
+      }
+    }
+    return false;
+  }
+
+  // fraction of sample points along a straight edge that have ink nearby —
+  // tolerant of a wavy or dashed hand-drawn line, unlike requiring the exact
+  // edge pixel or unbroken ink.
+  function edgeInkFrac(binary, p0, p1, samples, halfWidth) {
+    let hit = 0;
+    for (let i = 0; i < samples; i++) {
+      const t = i / (samples - 1);
+      const x = p0.x + (p1.x - p0.x) * t;
+      const y = p0.y + (p1.y - p0.y) * t;
+      if (hasInkNear(binary, x, y, halfWidth)) hit++;
+    }
+    return hit / samples;
+  }
+
+  // Every ink pixel belongs to some connected component (a contour). Split
+  // the whole frame into components once per frame — cheap, and lets the box
+  // fit below filter by component LENGTH, not just proximity: a real box
+  // edge is long (a couple of bullseye diameters), while an individual
+  // handwritten letter stroke is short. That's what actually keeps nearby
+  // writing (a title above the glyph, another glyph's label) out of the fit
+  // — proximity alone doesn't, real writing is often well within any search
+  // radius generous enough to tolerate a gappy box.
+  function findInkComponents(C, binary) {
+    const contours = new C.MatVector();
+    const hierarchy = new C.Mat();
+    C.findContours(binary, contours, hierarchy, C.RETR_LIST, C.CHAIN_APPROX_NONE);
+    hierarchy.delete();
+    const comps = [];
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const r = C.boundingRect(cnt);
+      const pts = Array.from(cnt.data32S);
+      cnt.delete();
+      comps.push({
+        longSide: Math.max(r.width, r.height),
+        cx: r.x + r.width / 2,
+        cy: r.y + r.height / 2,
+        radius: Math.hypot(r.width, r.height) / 2,
+        pts,
+      });
+    }
+    contours.delete();
+    return comps;
+  }
+
+  // every ink pixel within radius r of (cx, cy), from components at least
+  // minLen long, excluding a disk around the center (so the bullseye's own
+  // ring/dot ink isn't counted as box ink). Flat [x0,y0,x1,y1,...] array, not
+  // {x,y} objects — this can be a lot of points and avoiding per-point
+  // object allocation matters here.
+  function collectLineInkPoints(components, cx, cy, r, excludeR, minLen) {
+    const rsq = r * r;
+    const exsq = excludeR * excludeR;
+    const pts = [];
+    for (const comp of components) {
+      if (comp.longSide < minLen) continue;
+      const dx0 = comp.cx - cx;
+      const dy0 = comp.cy - cy;
+      const reach = r + comp.radius;
+      if (dx0 * dx0 + dy0 * dy0 > reach * reach) continue; // component nowhere near the search disk
+      for (let i = 0; i < comp.pts.length; i += 2) {
+        const x = comp.pts[i];
+        const y = comp.pts[i + 1];
+        const dx = x - cx;
+        const dy = y - cy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > rsq || d2 < exsq) continue;
+        pts.push(x, y);
+      }
+    }
+    return pts;
+  }
+
+  function minAreaRectFromFlatPoints(C, flat) {
+    const n = flat.length / 2;
+    if (n < 5) return null;
+    const mat = C.matFromArray(n, 1, C.CV_32SC2, flat);
+    const rect = C.minAreaRect(mat);
+    mat.delete();
+    return rect;
+  }
+
+  function pointToSegmentDist(px, py, ax, ay, bx, by) {
+    const abx = bx - ax;
+    const aby = by - ay;
+    const apx = px - ax;
+    const apy = py - ay;
+    const abLen2 = abx * abx + aby * aby;
+    let t = abLen2 > 0 ? (apx * abx + apy * aby) / abLen2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const qx = ax + abx * t;
+    const qy = ay + aby * t;
+    return Math.hypot(px - qx, py - qy);
+  }
+
+  function distToRectBoundary(corners, x, y) {
+    let best = Infinity;
+    for (let k = 0; k < 4; k++) {
+      const a = corners[k];
+      const b = corners[(k + 1) % 4];
+      const d = pointToSegmentDist(x, y, a.x, a.y, b.x, b.y);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  // The core of v3's tolerance: don't require the box to be one connected
+  // shape. Gather ink pixels in a generous radius around the bullseye — but
+  // only from components long enough to plausibly be a box edge, not a
+  // handwritten letter stroke — fit a rotated rectangle, then iteratively
+  // keep only the points that ended up near that fit's boundary and refit —
+  // a few rounds of this converges onto the box even when its lines are
+  // gappy, uneven, non-parallel, or when unrelated ink (nearby handwriting,
+  // another glyph) sits within the same search radius.
+  function fitBoxForBullseye(C, binary, components, bullseye, lo) {
+    const { cx, cy, diameter } = bullseye;
+    const W = binary.cols;
+    const H = binary.rows;
+    // measured against a real sheet: a box's far corner sits roughly 3-3.2x
+    // the bullseye's diameter away, while glyphs in a densely packed grid
+    // can sit only ~5-6x apart — this needs enough margin over the former
+    // without reaching the latter
+    const searchR = Math.min(diameter * 4.5, Math.max(W, H));
+    // generous on purpose: Hough's own radius estimate can undershoot the
+    // ring's true outer edge (seen under rotation/interpolation — the ring's
+    // real ink can reach past 1x the reported diameter/2), and any ring
+    // pixel that leaks past this boundary badly skews the box fit toward
+    // including the bullseye itself
+    const excludeR = diameter * 1.05;
+    // a real box's shorter side still comfortably clears this — measured
+    // against a real photo, a stray title-text stroke sitting well inside
+    // the search radius did not
+    const minLen = diameter * 0.9;
+
+    const pool = collectLineInkPoints(components, cx, cy, searchR, excludeR, minLen);
+    if (pool.length / 2 < 24) return null;
+
+    // seed the fit from the SINGLE qualifying component nearest the
+    // bullseye, not the whole pool at once. By design the intended box sits
+    // immediately next to the bullseye (a small gap, not several diameters)
+    // — much closer than any neighboring glyph's box in a densely packed
+    // grid — so this reliably grabs the right one even when the full search
+    // radius (needed for gap tolerance) also reaches other glyphs' boxes.
+    let seed = null;
+    let seedDist = Infinity;
+    const exsq = excludeR * excludeR;
+    for (const comp of components) {
+      if (comp.longSide < minLen) continue;
+      for (let i = 0; i < comp.pts.length; i += 2) {
+        const x = comp.pts[i];
+        const y = comp.pts[i + 1];
+        const d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+        if (d2 < exsq || d2 > searchR * searchR) continue;
+        if (d2 < seedDist) { seedDist = d2; seed = comp; }
+      }
+    }
+    if (!seed) return null;
+
+    let rect = minAreaRectFromFlatPoints(C, seed.pts);
+    if (!rect) return null;
+
+    // grow from the seed: each round, pull in ink from the whole pool (any
+    // qualifying component in range, not just the seed's) that ended up
+    // near the CURRENT fit's boundary, then refit. A gappy box's other
+    // sides (separate components) join in once the fit reaches them; a
+    // distant neighboring glyph's box never does, because it isn't near
+    // this fit's boundary no matter how many rounds run.
+    // enough rounds for a fit seeded from a small fragment (a gap cut off
+    // most of the box) to fully grow out to the true shape — convergence is
+    // gradual (one edge's worth of expansion per round is typical), and
+    // stopping early leaves an undersized, wrong-value rect that still
+    // passes the sanity gates below
+    for (let iter = 0; iter < 10; iter++) {
+      const corners = rotatedRectCorners(rect);
+      // floor anchored to the bullseye's diameter, not just the current
+      // fit's own size: when the seed is itself a small fragment (a gap cut
+      // it short), its minAreaRect is tiny/thin, and a tolerance scaled
+      // only off THAT never reaches far enough to pull in the box's other,
+      // separately-gapped sides — the fit would get stuck at the seed's own
+      // shape forever
+      const tol = Math.max(16, diameter * 0.5, 0.07 * Math.max(rect.size.width, rect.size.height));
+      const kept = [];
+      for (let i = 0; i < pool.length; i += 2) {
+        const x = pool[i];
+        const y = pool[i + 1];
+        if (distToRectBoundary(corners, x, y) < tol) { kept.push(x, y); }
+      }
+      if (kept.length / 2 < 20) break;
+      const next = minAreaRectFromFlatPoints(C, kept);
+      if (!next) break;
+      rect = next;
+    }
+
+    const shortSide = Math.min(rect.size.width, rect.size.height);
+    const longSide = Math.max(rect.size.width, rect.size.height);
+    // a real glyph's box is comfortably bigger than its bullseye, but not
+    // wildly so — generous bounds, not a precise ratio, since box:bullseye
+    // proportions aren't tightly specified
+    if (shortSide < Math.max(lo * 0.4, diameter * 0.8) || longSide > diameter * 9) return null;
+
+    const corners = rotatedRectCorners(rect);
+    // the bullseye should sit right at (or just outside) the fitted box's
+    // nearest corner — this is what keeps a search radius generous enough
+    // for gappy ink from also drifting onto a *different*, closer glyph's
+    // box in a densely packed sheet
+    const nearest = Math.min(...corners.map((p) => Math.hypot(p.x - cx, p.y - cy)));
+    if (nearest > diameter * 1.6) return null;
+
+    let sidesOk = 0;
+    for (let k = 0; k < 4; k++) {
+      const halfWidth = Math.max(5, Math.round(shortSide * 0.045));
+      if (edgeInkFrac(binary, corners[k], corners[(k + 1) % 4], 30, halfWidth) > 0.18) sidesOk++;
+    }
+    // 2 of 4, not 3: the convention already omits one side outright, and a
+    // heavily gapped real side can legitimately read low here even when the
+    // overall fit (seeded from a real, length-filtered component, checked
+    // against the bullseye's own position above) is correct
+    if (sidesOk < 2) return null;
+
+    return corners;
   }
 
   /** @param {cv.Mat} gray single-channel */
@@ -146,8 +418,12 @@
     const H = gray.rows;
     const W = gray.cols;
     const maxDim = Math.max(H, W);
-    const lo = 0.012 * maxDim;
-    const hi = 0.16 * maxDim;
+    const lo = 0.012 * maxDim; // min bullseye diameter
+    // max bullseye diameter — HoughCircles' cost scales heavily with the
+    // radius range searched (a 0.16 upper bound measured ~2.7s on a
+    // 1320-wide real photo; 0.08 measured ~150-250ms with no loss of the
+    // real bullseye, which sits well inside it), so keep this tight
+    const hi = 0.08 * maxDim;
 
     const blur = new C.Mat();
     const binary = new C.Mat();
@@ -155,76 +431,38 @@
     C.threshold(blur, binary, 0, 255, C.THRESH_BINARY_INV | C.THRESH_OTSU);
     blur.delete();
 
-    const contours = new C.MatVector();
-    const hierarchy = new C.Mat();
-    C.findContours(binary, contours, hierarchy, C.RETR_TREE, C.CHAIN_APPROX_SIMPLE);
-    const hd = hierarchy.data32S;
-
-    const bullseyes = findBullseyes(C, contours, hd, lo, hi);
-
-    const quads = [];
-    for (let i = 0; i < contours.size(); i++) {
-      if (hd[i * 4 + 3] !== -1) continue;
-      const cnt = contours.get(i);
-      const q = quadFromContour(C, cnt);
-      cnt.delete();
-      if (q) quads.push(q);
-    }
-    contours.delete();
-    hierarchy.delete();
-
-    // pair each bullseye with its nearest unclaimed, plausibly-sized quad —
-    // closest matches win first so two glyphs near each other don't steal
-    // one another's box
-    const claimed = new Set();
-    const ranked = bullseyes.map((b) => {
-      const bPt = { x: b.cx, y: b.cy };
-      let best = -1;
-      let bestD = Infinity;
-      quads.forEach((q, qi) => {
-        const long = longSide(q);
-        if (long < 1.1 * b.diameter || long > 12 * b.diameter) return;
-        const d = Math.min(...q.map((p) => dist(p, bPt)));
-        if (d < bestD) { bestD = d; best = qi; }
-      });
-      return { b, bPt, best, bestD };
-    }).sort((x, y) => x.bestD - y.bestD);
+    const bullseyes = findBullseyes(C, gray, binary, lo, hi);
+    const components = findInkComponents(C, binary);
 
     const glyphs = [];
-    for (const { b, bPt, best, bestD } of ranked) {
-      if (best === -1 || !isFinite(bestD) || bestD > 5 * b.diameter || claimed.has(best)) continue;
-      claimed.add(best);
+    for (const b of bullseyes) {
+      const corners = fitBoxForBullseye(C, binary, components, b, lo);
+      if (!corners) continue;
 
-      const cw = sortClockwise(quads[best]);
+      const bPt = { x: b.cx, y: b.cy };
+      const cw = sortClockwise(corners);
       let anchorIndex = 0;
       let anchorD = Infinity;
       cw.forEach((p, i) => {
-        const d = dist(p, bPt);
+        const d = Math.hypot(p.x - bPt.x, p.y - bPt.y);
         if (d < anchorD) { anchorD = d; anchorIndex = i; }
       });
       const ur = cw[(anchorIndex + 1) % 4];
       const lr = cw[(anchorIndex + 2) % 4];
       const ll = cw[(anchorIndex + 3) % 4];
       const c = centroid(cw);
-      const avgSide = (dist(cw[0], cw[1]) + dist(cw[1], cw[2]) + dist(cw[2], cw[3]) + dist(cw[3], cw[0])) / 4;
 
       const bitAt = (corner) => {
         const dx = c.x - corner.x;
         const dy = c.y - corner.y;
         const dd = Math.hypot(dx, dy) || 1;
-        const inset = 0.3 * dd;
+        const inset = 0.32 * dd;
         const px = corner.x + (dx / dd) * inset;
         const py = corner.y + (dy / dd) * inset;
-        const half = Math.max(3, Math.round(0.16 * avgSide));
-        const x0 = Math.max(0, Math.round(px - half));
-        const y0 = Math.max(0, Math.round(py - half));
-        const x1 = Math.min(W, Math.round(px + half));
-        const y1 = Math.min(H, Math.round(py + half));
-        if (x1 <= x0 || y1 <= y0) return 0;
-        const roi = binary.roi(new C.Rect(x0, y0, x1 - x0, y1 - y0));
-        const inkFrac = C.mean(roi)[0] / 255;
-        roi.delete();
-        return inkFrac > 0.38 ? 1 : 0;
+        const half = Math.max(5, Math.round(0.2 * dd));
+        // a lower bar than "solid fill": tolerates a hatched/scribbled corner
+        // mark, not just a clean solid square
+        return annulusInkFrac(binary, px, py, 0, half) > 0.22 ? 1 : 0;
       };
 
       const bits = { upperRight: bitAt(ur), lowerRight: bitAt(lr), lowerLeft: bitAt(ll) };
