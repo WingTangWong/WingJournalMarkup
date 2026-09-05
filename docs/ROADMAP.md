@@ -134,8 +134,10 @@ visually unambiguous against the 3 code-bit squares).
       hatched (non-solid) corner marks, stray writing beside the glyph, and
       two glyphs at real packing density
 - 🚧 Real photo (hand-drawn 4x4 reference sheet, 16 glyphs, tightly packed):
-      **9 of 16 decoded, ~600ms** — v1/v2 found none at all on it, but this
-      is not full coverage and the remaining ~7 are open. Not yet wired into
+      **8 of 16 located** with no false positives and accurate box geometry,
+      ~80ms at the demo's 900px live width — v1/v2 found none at all on it.
+      Decoding lags location: about half the read values are right by eye.
+      ⬜ the ~8 missed glyphs, ⬜ decode accuracy, ⬜ wire the sheet into
       REALWORLD-SAMPLES as a standing fixture
 - ⬜ Mapping the decoded value back to WJM's semantic fields
       (document_id/page_id/left/above/below/right, echoing §11.4's table) —

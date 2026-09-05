@@ -88,11 +88,19 @@ bullseye).
 
 **Real photo** — a hand-drawn 4x4 reference sheet (16 glyphs, packed tightly,
 with label text close enough above the first glyph to have wrecked an earlier
-version's fit): **9 of 16 decoded, ~600ms** at 1320px wide. The two earlier
-versions of this detector found *nothing* on that sheet, so this is a large
-step, but it is **not** full coverage — the remaining ~7 are an open item.
-That sheet is also a deliberately hard case: 16 glyphs at a density a real
-page would rarely have.
+version's fit):
+
+| | result |
+|---|---|
+| glyphs located | **8 of 16**, no false positives |
+| box geometry | accurate — the fitted boxes land on the real glyphs |
+| values decoded | **roughly half right** by eye; the rest still wrong |
+| speed | ~80ms at the demo's live 900px processing width |
+
+The two earlier versions of this detector found *nothing* on that sheet, so
+this is a large step — but **located is not decoded**, and neither number is
+finished work. That sheet is also a deliberately hard case: 16 glyphs at a
+density a real page would rarely have.
 
 Diagnosing against that real photo is what drove the design. Two findings
 were worth more than any amount of threshold tuning: the boxes are drawn as

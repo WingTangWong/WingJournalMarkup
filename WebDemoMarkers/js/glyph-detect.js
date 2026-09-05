@@ -59,11 +59,14 @@
  *
  * Real photo (a hand-drawn 4x4 reference sheet, 16 glyphs, packed tightly
  * and with label text close enough above the first glyph to have wrecked an
- * earlier version's fit): 9 of 16 decoded, ~600ms at 1320px wide. That is a
- * large improvement on the versions before it (v1/v2 found none at all on
- * this sheet) but it is NOT full coverage — the remaining ~7 are an open
- * item, not a solved problem, and this sheet is a deliberately hard case
- * (16 glyphs at a packing density a real page would rarely have).
+ * earlier version's fit): 8 of 16 located, no false positives, ~80ms at the
+ * demo's live 900px processing width. The located boxes land accurately on
+ * the glyphs. Decoding is the weaker half: spot-checking against the sheet
+ * by eye, roughly half the values are right and the rest are still wrong.
+ * v1/v2 found nothing at all on this sheet, so this is a large step, but
+ * "located" is not "decoded" and neither number is finished work. The sheet
+ * is also a deliberately hard case (16 glyphs at a packing density a real
+ * page would rarely have).
  *
  * detectGlyphs(cv, gray) -> [{
  *   quad: [[x,y]x4]  clockwise, quad[anchorIndex] is the corner nearest the bullseye
@@ -286,6 +289,34 @@
     return Math.hypot(px - qx, py - qy);
   }
 
+  // ink fraction in a disk, counting ONLY pixels far enough from the fitted
+  // box's own outline to not be part of it — see bitAt's note on why a plain
+  // disk probe can't tell a filled corner from an empty one.
+  function cornerInkFrac(binary, rectCorners, cx, cy, radius, borderTol) {
+    const W = binary.cols;
+    const H = binary.rows;
+    const data = binary.data;
+    const x0 = Math.max(0, Math.floor(cx - radius));
+    const x1 = Math.min(W - 1, Math.ceil(cx + radius));
+    const y0 = Math.max(0, Math.floor(cy - radius));
+    const y1 = Math.min(H - 1, Math.ceil(cy + radius));
+    const rsq = radius * radius;
+    let hit = 0;
+    let total = 0;
+    for (let y = y0; y <= y1; y++) {
+      const rowOff = y * W;
+      const dy = y - cy;
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx;
+        if (dx * dx + dy * dy > rsq) continue;
+        if (distToRectBoundary(rectCorners, x, y) < borderTol) continue;
+        total++;
+        if (data[rowOff + x] > 0) hit++;
+      }
+    }
+    return total ? hit / total : 0;
+  }
+
   function distToRectBoundary(corners, x, y) {
     let best = Infinity;
     for (let k = 0; k < 4; k++) {
@@ -386,10 +417,14 @@
 
     const shortSide = Math.min(rect.size.width, rect.size.height);
     const longSide = Math.max(rect.size.width, rect.size.height);
-    // a real glyph's box is comfortably bigger than its bullseye, but not
-    // wildly so — generous bounds, not a precise ratio, since box:bullseye
-    // proportions aren't tightly specified
-    if (shortSide < Math.max(lo * 0.4, diameter * 0.8) || longSide > diameter * 9) return null;
+    // A real glyph's box is comfortably bigger than its bullseye (measured
+    // ~2.3-2.6x on a real sheet). Requiring a clear margin over the bullseye
+    // in BOTH dimensions is what stops a round letter bowl plus a
+    // text-sized scrap of ink from passing as a glyph — that exact false
+    // positive showed up on the handwritten title of a real photo. Still
+    // generous, not a precise ratio: proportions aren't tightly specified.
+    if (shortSide < Math.max(lo * 0.4, diameter * 1.2)) return null;
+    if (longSide < diameter * 1.6 || longSide > diameter * 9) return null;
 
     const corners = rotatedRectCorners(rect);
     // the bullseye should sit right at (or just outside) the fitted box's
@@ -456,13 +491,17 @@
         const dx = c.x - corner.x;
         const dy = c.y - corner.y;
         const dd = Math.hypot(dx, dy) || 1;
-        const inset = 0.32 * dd;
+        const inset = 0.25 * dd;
         const px = corner.x + (dx / dd) * inset;
         const py = corner.y + (dy / dd) * inset;
-        const half = Math.max(5, Math.round(0.2 * dd));
-        // a lower bar than "solid fill": tolerates a hatched/scribbled corner
-        // mark, not just a clean solid square
-        return annulusInkFrac(binary, px, py, 0, half) > 0.22 ? 1 : 0;
+        const radius = Math.max(5, Math.round(0.17 * dd));
+        // Ignore ink belonging to the box's own outline. Two border strokes
+        // meet at every corner, so a plain disk probe here reads "inked" on
+        // an EMPTY corner just as readily as a filled one — measured against
+        // a real sheet, that alone turned 1s and 4s into 5s and 7s. The
+        // threshold stays low so a hatched or scribbled mark still counts.
+        const borderTol = Math.max(6, 0.08 * dd);
+        return cornerInkFrac(binary, cw, px, py, radius, borderTol) > 0.22 ? 1 : 0;
       };
 
       const bits = { upperRight: bitAt(ur), lowerRight: bitAt(lr), lowerLeft: bitAt(ll) };
